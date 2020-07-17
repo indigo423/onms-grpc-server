@@ -5,7 +5,6 @@
 // TODO
 // - Client Certificate Validation
 // - Prometheus Metrics
-// - Health Check
 package main
 
 import (
@@ -28,6 +27,8 @@ import (
 	"github.com/golang/protobuf/proto"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/health"
+	"google.golang.org/grpc/health/grpc_health_v1"
 	"gopkg.in/confluentinc/confluent-kafka-go.v1/kafka"
 )
 
@@ -69,6 +70,7 @@ type OnmsGrpcIpcServer struct {
 	TLSKeyFile              string
 
 	server    *grpc.Server
+	hs        *health.Server
 	producer  *kafka.Producer
 	consumers map[string]*kafka.Consumer
 
@@ -140,7 +142,13 @@ func (srv *OnmsGrpcIpcServer) Start() error {
 	} else {
 		srv.server = grpc.NewServer()
 	}
+	srv.hs = health.NewServer()
+
+	// Configure Services
 	ipc.RegisterOpenNMSIpcServer(srv.server, srv)
+	grpc_health_v1.RegisterHealthServer(srv.server, srv.hs)
+
+	// Start gRPC Server
 	jsonBytes, _ = json.MarshalIndent(srv.server.GetServiceInfo(), "", "  ")
 	log.Printf("gRPC server info: %s", string(jsonBytes))
 	go func() {
@@ -178,6 +186,7 @@ func (srv *OnmsGrpcIpcServer) Stop() {
 	for _, consumer := range srv.consumers {
 		consumer.Close()
 	}
+	srv.hs.Shutdown()
 	log.Println("done!")
 }
 
