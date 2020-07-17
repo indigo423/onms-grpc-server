@@ -1,0 +1,156 @@
+version: '3.7'
+
+services:
+
+  database:
+    container_name: database
+    hostname: database
+    image: postgres:12
+    environment:
+    - TZ=America/New_York
+    - POSTGRES_HOST=database
+    - POSTGRES_PORT=5432
+    - POSTGRES_USER=postgres
+    - POSTGRES_PASSWORD=postgres
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  zookeeper1:
+    image: zookeeper:3.5
+    container_name: zookeeper1
+    hostname: zookeeper1
+    environment:
+    - TZ=America/New_York
+    - ZOO_MY_ID=1
+    - ZOO_SERVERS=server.1=zookeeper1:2888:3888;2181
+    - ZOO_STANDALONE_ENABLED=true
+    - ZOO_4LW_COMMANDS_WHITELIST=*
+    healthcheck:
+      test: echo stat | nc zookeeper1 2181
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  kafka1:
+    image: wurstmeister/kafka:2.12-2.5.0
+    container_name: kafka1
+    hostname: kafka1
+    depends_on:
+    - zookeeper1
+    environment:
+    - TZ=America/New_York
+    - KAFKA_BROKER_ID=1
+    - KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://:9092
+    - KAFKA_LISTENERS=PLAINTEXT://:9092
+    - KAFKA_ZOOKEEPER_CONNECT=zookeeper1:2181/kafka
+    - KAFKA_NUM_PARTITIONS=4
+    - KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=1
+    - KAFKA_DEFAULT_REPLICATION_FACTOR=1
+    - KAFKA_MIN_INSYNC_REPLICAS=1
+    - KAFKA_AUTO_CREATE_TOPICS_ENABLE=true
+    - KAFKA_DELETE_TOPIC_ENABLE=true
+    - KAFKA_CONTROLLED_SHUTDOWN_ENABLE=true
+    healthcheck:
+      test: nc -z localhost 9092
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  manager:
+    image: hlebalbau/kafka-manager:stable
+    container_name: manager
+    hostname: manager
+    depends_on:
+    - zookeeper1
+    ports:
+    - 9000:9000 
+    environment:
+    - TZ=America/New_York
+    - ZK_HOSTS=zookeeper1:2181
+    healthcheck:
+      test: wget --quiet --tries=1 --spider http://localhost:9000 || exit 1
+      interval: 1m
+      timeout: 5s
+      retries: 3
+
+  opennms:
+    container_name: opennms
+    hostname: opennms
+    image: opennms/horizon:26.1.2
+    depends_on:
+    - database
+    - kafka1
+    command: [ -s ]
+    ports:
+    - 8980:8980
+    - 8101:8101
+    volumes:
+    - ./opennms-overlay:/opt/opennms-overlay
+    environment:
+    - TZ=America/New_York
+    - POSTGRES_HOST=database
+    - POSTGRES_PORT=5432
+    - POSTGRES_USER=postgres
+    - POSTGRES_PASSWORD=postgres
+    healthcheck:
+      test: curl -f -I http://localhost:8980/opennms/login.jsp
+      interval: 1m
+      timeout: 5s
+      retries: 3
+ 
+  grpc1:
+    container_name: grpc1
+    hostname: grpc1
+    build: ..
+    depends_on:
+    - kafka1
+    environment:
+    - TZ=America/New_York
+    - BOOTSTRAP_SERVER=kafka1:9092
+    - PORT=8990
+
+  minion1:
+    container_name: minion1
+    hostname: minion1
+    image: opennms/minion:26.1.2
+    depends_on:
+    - kafka1
+    - grpc1
+    - opennms
+    command: [ -c ]
+    volumes:
+    - ./minion1.yaml:/opt/minion/minion-config.yaml
+    environment:
+    - TZ=America/New_York
+    - OPENNMS_HTTP_USER=admin
+    - OPENNMS_HTTP_PASS=admin
+    healthcheck:
+      test: /health.sh
+      interval: 1m
+      timeout: 5s
+      retries: 3
+
+  minion2:
+    container_name: minion2
+    hostname: minion2
+    image: opennms/minion:26.1.2
+    depends_on:
+    - kafka1
+    - grpc1
+    - opennms
+    command: [ -c ]
+    volumes:
+    - ./minion2.yaml:/opt/minion/minion-config.yaml
+    environment:
+    - TZ=America/New_York
+    - OPENNMS_HTTP_USER=admin
+    - OPENNMS_HTTP_PASS=admin
+    healthcheck:
+      test: /health.sh
+      interval: 1m
+      timeout: 5s
+      retries: 3
+
