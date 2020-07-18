@@ -1,4 +1,4 @@
-OpenNMS IPC gRPC Server
+OpenNMS IPC gRPC Server [![Go Report Card](https://goreportcard.com/badge/github.com/agalue/onms-grpc-server)](https://goreportcard.com/report/github.com/agalue/onms-grpc-server)
 ====
 
 This is a [Go](https://golang.org/) version of the [Java-based](https://github.com/OpenNMS/grpc-server) gRPC-IPC Server.
