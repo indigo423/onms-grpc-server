@@ -29,6 +29,15 @@ do
 done
 
 OPTIONS=()
+if [ ! -z "${PORT}" ]; then
+  OPTIONS+=(-port "${PORT}")
+fi
+if [ ! -z "${HTTP_PORT}" ]; then
+  OPTIONS+=(-http-port "${HTTP_PORT}")
+fi
+if [ ! -z "${BOOTSTRAP_SERVER}" ]; then
+  OPTIONS+=(-bootstrap "${BOOTSTRAP_SERVER}")
+fi
 if [ "${TLS_ENABLED}" == "true" ]; then
   OPTIONS+=(-tls-enabled)
 fi
@@ -45,9 +54,4 @@ if [ ! -z "${MAX_BUFFER_SIZE}" ]; then
   OPTIONS+=(-max-buffer-size "${MAX_BUFFER_SIZE}")
 fi
 
-exec /onms-grpc-server \
-  -port "${PORT-8990}" \
-  -bootstrap "${BOOTSTRAP_SERVER-localhost:9092}" \
-  ${OPTIONS[@]} \
-  ${CONSUMER[@]} \
-  ${PRODUCDER[@]}
+exec /onms-grpc-server ${OPTIONS[@]} ${PRODUCDER[@]} ${CONSUMER[@]}

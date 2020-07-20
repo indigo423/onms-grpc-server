@@ -4,7 +4,7 @@
 //
 // TODO
 // - Client Certificate Validation
-// - Prometheus Metrics
+// - Prometheus Metrics for Kafka
 package main
 
 import (
@@ -15,6 +15,7 @@ import (
 	"log"
 	"math"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"strings"
@@ -25,10 +26,17 @@ import (
 	"github.com/agalue/onms-grpc-server/protobuf/rpc"
 	"github.com/agalue/onms-grpc-server/protobuf/sink"
 	"github.com/golang/protobuf/proto"
+
+	grpc_prometheus "github.com/grpc-ecosystem/go-grpc-prometheus"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/health"
 	"google.golang.org/grpc/health/grpc_health_v1"
+
 	"gopkg.in/confluentinc/confluent-kafka-go.v1/kafka"
 )
 
@@ -39,7 +47,8 @@ const (
 	sinkModulePrefix             = "Sink"
 	rpcRequestTopicName          = "rpc-request"
 	rpcResponseTopicName         = "rpc-response"
-	defaultPort                  = 8990
+	defaultGrpcPort              = 8990
+	defaultHTTPPort              = 2112
 	defaultMaxByfferSize         = 921600
 	defaultInstanceID            = "OpenNMS"
 )
@@ -59,7 +68,8 @@ func (p *PropertiesFlag) Set(value string) error {
 
 // OnmsGrpcIpcServer represents an OpenNMS gRPC Server instance
 type OnmsGrpcIpcServer struct {
-	Port                    int
+	GrpcPort                int
+	HTTPPort                int
 	KafkaBootstrap          string
 	KafkaProducerProperties PropertiesFlag
 	KafkaConsumerProperties PropertiesFlag
@@ -79,10 +89,159 @@ type OnmsGrpcIpcServer struct {
 	currentChunkCache    sync.Map
 	messageCache         sync.Map
 	rpcDelayQueue        sync.Map
+
+	metricDeliveredErrors   *prometheus.CounterVec
+	metricDeliveredBytes    *prometheus.CounterVec
+	metricDeliveredMessages *prometheus.CounterVec
+	metricReceivedErrors    *prometheus.CounterVec
+	metricReceivedMessages  *prometheus.CounterVec
+	metricReceivedBytes     *prometheus.CounterVec
+	metricExpiredMessages   prometheus.Counter
+}
+
+func (srv *OnmsGrpcIpcServer) initPrometheus() {
+	srv.metricDeliveredErrors = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "onms_kafka_producer_delivered_errors",
+		Help: "The total number of message delivery errors per topic associated with the Kafka producer",
+	}, []string{"topic"})
+	srv.metricDeliveredBytes = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "onms_kafka_producer_delivered_bytes",
+		Help: "The total number of bytes delivered per topic associated with the Kafka producer",
+	}, []string{"topic"})
+	srv.metricDeliveredMessages = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "onms_kafka_producer_delivered_messages",
+		Help: "The number of messages delivered per topic associated with the Kafka producer",
+	}, []string{"topic"})
+	srv.metricReceivedErrors = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "onms_kafka_consumer_received_errors",
+		Help: "The total number of errors received per location associated with a Kafka consumer",
+	}, []string{"location"})
+	srv.metricReceivedBytes = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "onms_kafka_consumer_received_bytes",
+		Help: "The total number of messages received per location associated with a Kafka consumer",
+	}, []string{"location"})
+	srv.metricReceivedMessages = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "onms_kafka_consumer_received_messages",
+		Help: "The total number of bytes received per location associated with a Kafka consumer",
+	}, []string{"location"})
+	srv.metricExpiredMessages = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "onms_kafka_expired_messages",
+		Help: "The total number of expired messages per location due to TTL",
+	})
+
+	// Start HTTP Server
+	go func() {
+		log.Printf("starting Prometheus Metrics server %d\n", srv.HTTPPort)
+		http.Handle("/metrics", promhttp.Handler())
+		http.ListenAndServe(fmt.Sprintf(":%d", srv.HTTPPort), nil)
+	}()
+}
+
+func (srv *OnmsGrpcIpcServer) initKafkaProducer() error {
+	var err error
+
+	// Initialize Producer Configuration
+	kafkaConfig := &kafka.ConfigMap{"bootstrap.servers": srv.KafkaBootstrap}
+	if srv.KafkaProducerProperties != nil {
+		for _, kv := range srv.KafkaProducerProperties {
+			array := strings.Split(kv, "=")
+			if err = kafkaConfig.SetKey(array[0], array[1]); err != nil {
+				return err
+			}
+		}
+	}
+
+	// Initialize Kafka Producer
+	if srv.producer, err = kafka.NewProducer(kafkaConfig); err != nil {
+		return fmt.Errorf("could not create producer: %v", err)
+	}
+
+	// Initialize Producer Message Logger
+	go func() {
+		for e := range srv.producer.Events() {
+			switch ev := e.(type) {
+			case *kafka.Message:
+				if ev.TopicPartition.Error != nil {
+					srv.metricDeliveredErrors.WithLabelValues(*ev.TopicPartition.Topic).Inc()
+					log.Printf("delivery failed: %v\n", ev.TopicPartition)
+				} else {
+					bytes := len(ev.Value)
+					srv.metricDeliveredMessages.WithLabelValues(*ev.TopicPartition.Topic).Inc()
+					srv.metricDeliveredBytes.WithLabelValues(*ev.TopicPartition.Topic).Add(float64(bytes))
+					log.Printf("delivered message of %d bytes with key %s to %v\n", bytes, ev.Key, ev.TopicPartition)
+				}
+			default:
+				log.Printf("kafka event: %s\n", ev)
+			}
+		}
+	}()
+
+	return nil
+}
+
+func (srv *OnmsGrpcIpcServer) initGrpcServer() error {
+	// Initialize gRPC Server
+	options := make([]grpc.ServerOption, 0)
+	if srv.TLSEnabled {
+		creds, err := credentials.NewServerTLSFromFile(srv.TLSCertFile, srv.TLSKeyFile)
+		if err != nil {
+			return fmt.Errorf("Failed to setup TLS: %v", err)
+		}
+		options = append(options, grpc.Creds(creds))
+	}
+	options = append(options, grpc.StreamInterceptor(grpc_prometheus.StreamServerInterceptor))
+	srv.server = grpc.NewServer(options...)
+	srv.hs = health.NewServer()
+
+	// Configure gRPC Services
+	ipc.RegisterOpenNMSIpcServer(srv.server, srv)
+	grpc_health_v1.RegisterHealthServer(srv.server, srv.hs)
+	grpc_prometheus.Register(srv.server)
+	jsonBytes, _ := json.MarshalIndent(srv.server.GetServiceInfo(), "", "  ")
+	log.Printf("gRPC server info: %s", string(jsonBytes))
+
+	// Initialize TCP Listener
+	listener, err := net.Listen("tcp", fmt.Sprintf(":%d", srv.GrpcPort))
+	if err != nil {
+		return fmt.Errorf("cannot initialize listener: %v", err)
+	}
+
+	// Start gRPC Server
+	go func() {
+		log.Printf("starting gRPC server on port %d\n", srv.GrpcPort)
+		if err = srv.server.Serve(listener); err != nil {
+			log.Fatalf("could not serve: %v", err)
+		}
+	}()
+
+	return nil
+}
+
+func (srv *OnmsGrpcIpcServer) initDelayQueueProcessor() {
+	go func() {
+		for now := range time.Tick(time.Second) {
+			srv.rpcDelayQueue.Range(func(key interface{}, value interface{}) bool {
+				rpcID := key.(string)
+				expiration := value.(uint64)
+				if uint64(now.Unix()) > expiration {
+					log.Printf("RPC message %s expired", rpcID)
+					srv.metricExpiredMessages.Inc()
+					srv.rpcDelayQueue.Delete(rpcID)
+					srv.messageCache.Delete(rpcID)
+					srv.currentChunkCache.Delete(rpcID)
+				}
+				return true
+			})
+		}
+	}()
 }
 
 // Start initiates the gRPC server and the Kafka Producer instances
 func (srv *OnmsGrpcIpcServer) Start() error {
+	if srv.server != nil {
+		return fmt.Errorf("gRPC server is already started")
+	}
+
 	jsonBytes, _ := json.MarshalIndent(srv, "", "  ")
 	log.Printf("initializing gRPC server: %s", string(jsonBytes))
 
@@ -95,86 +254,16 @@ func (srv *OnmsGrpcIpcServer) Start() error {
 	srv.messageCache = sync.Map{}
 	srv.rpcDelayQueue = sync.Map{}
 
-	// Initialize Kafka Producer
-	kafkaConfig := &kafka.ConfigMap{"bootstrap.servers": srv.KafkaBootstrap}
-	if srv.KafkaProducerProperties != nil {
-		for _, kv := range srv.KafkaProducerProperties {
-			array := strings.Split(kv, "=")
-			if err = kafkaConfig.SetKey(array[0], array[1]); err != nil {
-				return err
-			}
-		}
-	}
-	srv.producer, err = kafka.NewProducer(kafkaConfig)
-	if err != nil {
-		return fmt.Errorf("could not create producer: %v", err)
+	if err = srv.initKafkaProducer(); err != nil {
+		return err
 	}
 
-	// Initialize Producer Message Logger
-	go func() {
-		for e := range srv.producer.Events() {
-			switch ev := e.(type) {
-			case *kafka.Message:
-				if ev.TopicPartition.Error != nil {
-					log.Printf("delivery failed: %v\n", ev.TopicPartition)
-				} else {
-					log.Printf("delivered message of %d bytes with key %s to %v\n", len(ev.Value), ev.Key, ev.TopicPartition)
-				}
-			default:
-				log.Printf("kafka event: %s\n", ev)
-			}
-		}
-	}()
-
-	// Initialize TCP Listener
-	listener, err := net.Listen("tcp", fmt.Sprintf(":%d", srv.Port))
-	if err != nil {
-		return fmt.Errorf("cannot initialize listener: %v", err)
+	if err = srv.initGrpcServer(); err != nil {
+		return err
 	}
 
-	// Initialize gRPC Server
-	if srv.TLSEnabled {
-		creds, err := credentials.NewServerTLSFromFile(srv.TLSCertFile, srv.TLSKeyFile)
-		if err != nil {
-			return fmt.Errorf("Failed to setup TLS: %v", err)
-		}
-		srv.server = grpc.NewServer(grpc.Creds(creds))
-	} else {
-		srv.server = grpc.NewServer()
-	}
-	srv.hs = health.NewServer()
-
-	// Configure Services
-	ipc.RegisterOpenNMSIpcServer(srv.server, srv)
-	grpc_health_v1.RegisterHealthServer(srv.server, srv.hs)
-
-	// Start gRPC Server
-	jsonBytes, _ = json.MarshalIndent(srv.server.GetServiceInfo(), "", "  ")
-	log.Printf("gRPC server info: %s", string(jsonBytes))
-	go func() {
-		log.Printf("starting gRPC server on port %d\n", srv.Port)
-		if err = srv.server.Serve(listener); err != nil {
-			log.Fatalf("could not serve: %v", err)
-		}
-	}()
-
-	// Initialize Delay Queue Processor
-	go func() {
-		for now := range time.Tick(time.Second) {
-			srv.rpcDelayQueue.Range(func(key interface{}, value interface{}) bool {
-				rpcID := key.(string)
-				expiration := value.(uint64)
-				if uint64(now.Unix()) > expiration {
-					log.Printf("RPC message %s expired", rpcID)
-					srv.rpcDelayQueue.Delete(rpcID)
-					srv.messageCache.Delete(rpcID)
-					srv.currentChunkCache.Delete(rpcID)
-				}
-				return true
-			})
-		}
-	}()
-
+	srv.initDelayQueueProcessor()
+	srv.initPrometheus()
 	return nil
 }
 
@@ -312,6 +401,8 @@ func (srv *OnmsGrpcIpcServer) startConsumingForLocation(location string) error {
 					log.Printf("invalid message received: %v", err)
 					continue
 				}
+				srv.metricReceivedMessages.WithLabelValues(location).Inc()
+				srv.metricReceivedBytes.WithLabelValues(location).Add(float64(len(e.Value)))
 				log.Printf("processing RPC message %s", rpcMsg.RpcId)
 				srv.rpcDelayQueue.Store(rpcMsg.RpcId, rpcMsg.ExpirationTime)
 				rpcContent := rpcMsg.RpcContent
@@ -339,6 +430,7 @@ func (srv *OnmsGrpcIpcServer) startConsumingForLocation(location string) error {
 				srv.sendRequest(location, rpcRequest)
 			case kafka.Error:
 				log.Printf("consumer error %v", e)
+				srv.metricReceivedErrors.WithLabelValues(location).Inc()
 			}
 		}
 	}()
@@ -466,7 +558,8 @@ func (srv *OnmsGrpcIpcServer) sendToKafka(topic string, key string, value []byte
 
 func main() {
 	srv := &OnmsGrpcIpcServer{}
-	flag.IntVar(&srv.Port, "port", defaultPort, "gRPC Server Listener Port")
+	flag.IntVar(&srv.GrpcPort, "port", defaultGrpcPort, "gRPC Server Listener Port")
+	flag.IntVar(&srv.HTTPPort, "http-port", defaultHTTPPort, "HTTP Server Listener Port (Prometheus Metrics)")
 	flag.StringVar(&srv.OnmsInstanceID, "instance-id", defaultInstanceID, "OpenNMS Instance ID")
 	flag.StringVar(&srv.KafkaBootstrap, "bootstrap", "localhost:9092", "Kafka Bootstrap Server")
 	flag.Var(&srv.KafkaProducerProperties, "producer-cfg", "Kafka Producer configuration entry (can be used multiple times)\nfor instance: acks=1")

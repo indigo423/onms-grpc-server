@@ -95,6 +95,7 @@ services:
     - POSTGRES_PORT=5432
     - POSTGRES_USER=postgres
     - POSTGRES_PASSWORD=postgres
+    - JAVA_OPTS=-Xms4096m -Xmx4096m -XX:+UseG1GC -XX:+UseStringDeduplication
     healthcheck:
       test: curl -f -I http://localhost:8980/opennms/login.jsp
       interval: 1m
@@ -107,10 +108,12 @@ services:
     build: ..
     depends_on:
     - kafka1
+    ports:
+    - 2112:2112
+    - 8990:8990
     environment:
     - TZ=America/New_York
     - BOOTSTRAP_SERVER=kafka1:9092
-    - PORT=8990
 
   minion1:
     container_name: minion1
@@ -127,6 +130,7 @@ services:
     - TZ=America/New_York
     - OPENNMS_HTTP_USER=admin
     - OPENNMS_HTTP_PASS=admin
+    - JAVA_OPTS=-Xms1024m -Xmx1024m -XX:+UseG1GC -XX:+UseStringDeduplication
     healthcheck:
       test: /health.sh
       interval: 1m
@@ -148,6 +152,7 @@ services:
     - TZ=America/New_York
     - OPENNMS_HTTP_USER=admin
     - OPENNMS_HTTP_PASS=admin
+    - JAVA_OPTS=-Xms1024m -Xmx1024m -XX:+UseG1GC -XX:+UseStringDeduplication
     healthcheck:
       test: /health.sh
       interval: 1m
