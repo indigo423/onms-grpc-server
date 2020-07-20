@@ -33,6 +33,7 @@ docker build -t agalue/onms-grpc-server .
   -tls-key /grpc/key.pem \
   -tls-cert /grpc/cert.pem \
   -port 8990 \
+  -http-port 2112 \
   -max-buffer-size 10485760 \
   -producer-cfg acks=1 \
   -bootstrap kafka1.example.com:9092
@@ -49,6 +50,7 @@ docker run -d --name grpc-server \
   -e TLS_KEY=/grpc/key.pem \
   -e TLS_CERT=/grpc/cert.pem \
   -e PORT=8990 \
+  -e HTTP_PORT=2112 \
   -e MAX_BUFFER_SIZE=10485760 \
   -e PRODUCER_ACKS=1 \
   -e BOOTSTRAP_SERVER kafka1.example.com:9092
@@ -56,4 +58,4 @@ docker run -d --name grpc-server \
   agalue/onms-grpc-server
 ```
 
-
+> The HTTP port is for accessing metrics in Prometheus format
