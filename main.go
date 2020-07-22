@@ -3,8 +3,8 @@
 // GO version of the Java based gRPC Server.
 //
 // TODO
+// - Handle multiple Minions per Location through round-robin (rpcHandlerIteratorMap)
 // - Client Certificate Validation
-// - Prometheus Metrics for Kafka
 package main
 
 import (
