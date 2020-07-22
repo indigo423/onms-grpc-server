@@ -3,7 +3,6 @@
 // GO version of the Java based gRPC Server.
 //
 // TODO
-// - Handle multiple Minions per Location through round-robin (rpcHandlerIteratorMap)
 // - Client Certificate Validation
 package main
 
@@ -66,6 +65,50 @@ func (p *PropertiesFlag) Set(value string) error {
 	return nil
 }
 
+// RoundRobinHandlerMap is an RPC Handler Round Robin map
+type RoundRobinHandlerMap struct {
+	handlerIDs []string
+	handlerMap *sync.Map
+	current    int
+}
+
+// Add adds a new handler to the round-robin map if it doesn't exist
+func (h *RoundRobinHandlerMap) Add(id string, handler ipc.OpenNMSIpc_RpcStreamingServer) {
+	if h.handlerMap == nil {
+		h.handlerMap = new(sync.Map)
+	}
+	if _, ok := h.handlerMap.Load(id); !ok {
+		h.handlerMap.Store(id, handler)
+		h.handlerIDs = append(h.handlerIDs, id)
+	}
+}
+
+// Get obtain the next handler in a round-robin basis
+func (h *RoundRobinHandlerMap) Get() ipc.OpenNMSIpc_RpcStreamingServer {
+	if h.handlerMap == nil {
+		return nil
+	}
+	h.current++
+	if h.current == len(h.handlerIDs) {
+		h.current = 0
+	}
+	if handler, ok := h.handlerMap.Load(h.handlerIDs[h.current]); ok {
+		if handler != nil {
+			return handler.(ipc.OpenNMSIpc_RpcStreamingServer)
+		}
+	}
+	return nil
+}
+
+// Contains returns true if the ID is present in the round-robin map
+func (h *RoundRobinHandlerMap) Contains(id string) bool {
+	if h.handlerMap == nil {
+		return false
+	}
+	_, ok := h.handlerMap.Load(id)
+	return ok
+}
+
 // OnmsGrpcIpcServer represents an OpenNMS gRPC Server instance
 type OnmsGrpcIpcServer struct {
 	GrpcPort                int
@@ -84,11 +127,11 @@ type OnmsGrpcIpcServer struct {
 	producer  *kafka.Producer
 	consumers map[string]*kafka.Consumer
 
-	rpcHandlerByLocation sync.Map
-	rpcHandlerByMinionID sync.Map
-	currentChunkCache    sync.Map
-	messageCache         sync.Map
-	rpcDelayQueue        sync.Map
+	rpcHandlerByLocation sync.Map // key: location, value: RoundRobinHandlerMap
+	rpcHandlerByMinionID sync.Map // key: minion ID, value: gRPC handler
+	currentChunkCache    sync.Map // key: RPC message ID, value: current chunk number
+	messageCache         sync.Map // key: RPC message ID, value: byte slice
+	rpcDelayQueue        sync.Map // key: RPC message ID, value: RPC expiration time
 
 	metricDeliveredErrors   *prometheus.CounterVec
 	metricDeliveredBytes    *prometheus.CounterVec
@@ -353,8 +396,10 @@ func (srv *OnmsGrpcIpcServer) addRPCHandler(location string, systemID string, rp
 		log.Printf("invalid metadata received with location = '%s', systemId = '%s'", location, systemID)
 		return
 	}
-	if _, ok := srv.rpcHandlerByLocation.Load(location); !ok {
-		srv.rpcHandlerByLocation.Store(location, rpcHandler)
+	obj, _ := srv.rpcHandlerByLocation.LoadOrStore(location, &RoundRobinHandlerMap{})
+	handlerMap := obj.(*RoundRobinHandlerMap)
+	if !handlerMap.Contains(systemID) {
+		handlerMap.Add(systemID, rpcHandler)
 		srv.rpcHandlerByMinionID.Store(systemID, rpcHandler)
 		log.Printf("added RPC handler for minion %s at location %s", systemID, location)
 	}
@@ -362,7 +407,7 @@ func (srv *OnmsGrpcIpcServer) addRPCHandler(location string, systemID string, rp
 
 func (srv *OnmsGrpcIpcServer) startConsumingForLocation(location string) error {
 	if srv.consumers[location] != nil {
-		return fmt.Errorf("a consumer already exists for location %s", location)
+		return nil
 	}
 
 	kafkaConfig := &kafka.ConfigMap{
@@ -484,11 +529,12 @@ func (srv *OnmsGrpcIpcServer) getRPCHandler(location string, systemID string) ip
 		}
 		return stream.(ipc.OpenNMSIpc_RpcStreamingServer)
 	}
-	stream, _ := srv.rpcHandlerByLocation.Load(location)
-	if stream == nil {
+	obj, _ := srv.rpcHandlerByLocation.Load(location)
+	if obj == nil {
 		return nil
 	}
-	return stream.(ipc.OpenNMSIpc_RpcStreamingServer)
+	handlerMap := obj.(*RoundRobinHandlerMap)
+	return handlerMap.Get()
 }
 
 func (srv *OnmsGrpcIpcServer) sendRequest(location string, rpcRequest *ipc.RpcRequestProto) {

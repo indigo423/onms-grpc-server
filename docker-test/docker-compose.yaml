@@ -159,3 +159,25 @@ services:
       timeout: 5s
       retries: 3
 
+  minion3:
+    container_name: minion3
+    hostname: minion3
+    image: opennms/minion:26.1.2
+    depends_on:
+    - kafka1
+    - grpc1
+    - opennms
+    command: [ -c ]
+    volumes:
+    - ./minion3.yaml:/opt/minion/minion-config.yaml
+    environment:
+    - TZ=America/New_York
+    - OPENNMS_HTTP_USER=admin
+    - OPENNMS_HTTP_PASS=admin
+    - JAVA_OPTS=-Xms1024m -Xmx1024m -XX:+UseG1GC -XX:+UseStringDeduplication
+    healthcheck:
+      test: /health.sh
+      interval: 1m
+      timeout: 5s
+      retries: 3
+
