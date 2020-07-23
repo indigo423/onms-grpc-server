@@ -28,7 +28,6 @@ import (
 
 	grpc_prometheus "github.com/grpc-ecosystem/go-grpc-prometheus"
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"google.golang.org/grpc"
@@ -51,6 +50,23 @@ const (
 	defaultMaxByfferSize         = 921600
 	defaultInstanceID            = "OpenNMS"
 )
+
+// KafkaConsumer creates an generic interface with the relevant methods from kafka.Consumer
+// This allows to use a mock implementation for testing purposes
+type KafkaConsumer interface {
+	Subscribe(topic string, rebalanceCb kafka.RebalanceCb) error
+	Poll(timeoutMs int) (event kafka.Event)
+	CommitMessage(m *kafka.Message) ([]kafka.TopicPartition, error)
+	Close() error
+}
+
+// KafkaProducer creates an generic interface with the relevant methods from kafka.Producer
+// This allows to use a mock implementation for testing purposes
+type KafkaProducer interface {
+	Produce(msg *kafka.Message, deliveryChan chan kafka.Event) error
+	Events() chan kafka.Event
+	Close()
+}
 
 // PropertiesFlag represents an array of string flags
 type PropertiesFlag []string
@@ -124,8 +140,8 @@ type OnmsGrpcIpcServer struct {
 
 	server    *grpc.Server
 	hs        *health.Server
-	producer  *kafka.Producer
-	consumers map[string]*kafka.Consumer
+	producer  KafkaProducer
+	consumers map[string]KafkaConsumer
 
 	rpcHandlerByLocation sync.Map // key: location, value: RoundRobinHandlerMap
 	rpcHandlerByMinionID sync.Map // key: minion ID, value: gRPC handler
@@ -142,37 +158,55 @@ type OnmsGrpcIpcServer struct {
 	metricExpiredMessages   prometheus.Counter
 }
 
-func (srv *OnmsGrpcIpcServer) initPrometheus() {
-	srv.metricDeliveredErrors = promauto.NewCounterVec(prometheus.CounterOpts{
+func (srv *OnmsGrpcIpcServer) initVariables() {
+	srv.consumers = make(map[string]KafkaConsumer)
+	srv.rpcHandlerByLocation = sync.Map{}
+	srv.rpcHandlerByMinionID = sync.Map{}
+	srv.currentChunkCache = sync.Map{}
+	srv.messageCache = sync.Map{}
+	srv.rpcDelayQueue = sync.Map{}
+
+	srv.metricDeliveredErrors = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "onms_kafka_producer_delivered_errors",
 		Help: "The total number of message delivery errors per topic associated with the Kafka producer",
 	}, []string{"topic"})
-	srv.metricDeliveredBytes = promauto.NewCounterVec(prometheus.CounterOpts{
+	srv.metricDeliveredBytes = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "onms_kafka_producer_delivered_bytes",
 		Help: "The total number of bytes delivered per topic associated with the Kafka producer",
 	}, []string{"topic"})
-	srv.metricDeliveredMessages = promauto.NewCounterVec(prometheus.CounterOpts{
+	srv.metricDeliveredMessages = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "onms_kafka_producer_delivered_messages",
 		Help: "The number of messages delivered per topic associated with the Kafka producer",
 	}, []string{"topic"})
-	srv.metricReceivedErrors = promauto.NewCounterVec(prometheus.CounterOpts{
+	srv.metricReceivedErrors = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "onms_kafka_consumer_received_errors",
 		Help: "The total number of errors received per location associated with a Kafka consumer",
 	}, []string{"location"})
-	srv.metricReceivedBytes = promauto.NewCounterVec(prometheus.CounterOpts{
+	srv.metricReceivedBytes = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "onms_kafka_consumer_received_bytes",
 		Help: "The total number of messages received per location associated with a Kafka consumer",
 	}, []string{"location"})
-	srv.metricReceivedMessages = promauto.NewCounterVec(prometheus.CounterOpts{
+	srv.metricReceivedMessages = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "onms_kafka_consumer_received_messages",
 		Help: "The total number of bytes received per location associated with a Kafka consumer",
 	}, []string{"location"})
-	srv.metricExpiredMessages = promauto.NewCounter(prometheus.CounterOpts{
+	srv.metricExpiredMessages = prometheus.NewCounter(prometheus.CounterOpts{
 		Name: "onms_kafka_expired_messages",
 		Help: "The total number of expired messages per location due to TTL",
 	})
+}
 
-	// Start HTTP Server
+func (srv *OnmsGrpcIpcServer) initPrometheus() {
+	prometheus.MustRegister(
+		srv.metricDeliveredErrors,
+		srv.metricDeliveredBytes,
+		srv.metricDeliveredMessages,
+		srv.metricReceivedErrors,
+		srv.metricReceivedBytes,
+		srv.metricReceivedMessages,
+		srv.metricExpiredMessages,
+	)
+
 	go func() {
 		log.Printf("starting Prometheus Metrics server %d\n", srv.HTTPPort)
 		http.Handle("/metrics", promhttp.Handler())
@@ -183,15 +217,15 @@ func (srv *OnmsGrpcIpcServer) initPrometheus() {
 func (srv *OnmsGrpcIpcServer) initKafkaProducer() error {
 	var err error
 
+	// Silently ignore if producer was already initialized
+	if srv.producer != nil {
+		return nil
+	}
+
 	// Initialize Producer Configuration
 	kafkaConfig := &kafka.ConfigMap{"bootstrap.servers": srv.KafkaBootstrap}
-	if srv.KafkaProducerProperties != nil {
-		for _, kv := range srv.KafkaProducerProperties {
-			array := strings.Split(kv, "=")
-			if err = kafkaConfig.SetKey(array[0], array[1]); err != nil {
-				return err
-			}
-		}
+	if err := srv.updateKafkaConfig(kafkaConfig, srv.KafkaProducerProperties); err != nil {
+		return err
 	}
 
 	// Initialize Kafka Producer
@@ -279,32 +313,37 @@ func (srv *OnmsGrpcIpcServer) initDelayQueueProcessor() {
 	}()
 }
 
+func (srv *OnmsGrpcIpcServer) updateKafkaConfig(cfg *kafka.ConfigMap, properties PropertiesFlag) error {
+	if properties != nil {
+		for _, kv := range properties {
+			array := strings.Split(kv, "=")
+			if err := cfg.SetKey(array[0], array[1]); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 // Start initiates the gRPC server and the Kafka Producer instances
 func (srv *OnmsGrpcIpcServer) Start() error {
+	var err error
+
+	// Silently ignore if producer was already initialized
 	if srv.server != nil {
-		return fmt.Errorf("gRPC server is already started")
+		return nil
 	}
 
 	jsonBytes, _ := json.MarshalIndent(srv, "", "  ")
 	log.Printf("initializing gRPC server: %s", string(jsonBytes))
 
-	// Initialize Maps
-	var err error
-	srv.consumers = make(map[string]*kafka.Consumer)
-	srv.rpcHandlerByLocation = sync.Map{}
-	srv.rpcHandlerByMinionID = sync.Map{}
-	srv.currentChunkCache = sync.Map{}
-	srv.messageCache = sync.Map{}
-	srv.rpcDelayQueue = sync.Map{}
-
+	srv.initVariables()
 	if err = srv.initKafkaProducer(); err != nil {
 		return err
 	}
-
 	if err = srv.initGrpcServer(); err != nil {
 		return err
 	}
-
 	srv.initDelayQueueProcessor()
 	srv.initPrometheus()
 	return nil
@@ -313,12 +352,18 @@ func (srv *OnmsGrpcIpcServer) Start() error {
 // Stop gracefully stop the gRPC server and the Kafka Producer/Consumer instances
 func (srv *OnmsGrpcIpcServer) Stop() {
 	log.Println("shutting down...")
-	srv.server.Stop()
-	srv.producer.Close()
+	if srv.server != nil {
+		srv.server.Stop()
+	}
+	if srv.hs != nil {
+		srv.hs.Shutdown()
+	}
+	if srv.producer != nil {
+		srv.producer.Close()
+	}
 	for _, consumer := range srv.consumers {
 		consumer.Close()
 	}
-	srv.hs.Shutdown()
 	log.Println("done!")
 }
 
@@ -415,13 +460,8 @@ func (srv *OnmsGrpcIpcServer) startConsumingForLocation(location string) error {
 		"group.id":                srv.OnmsInstanceID,
 		"auto.commit.interval.ms": 1000,
 	}
-	if srv.KafkaConsumerProperties != nil {
-		for _, kv := range srv.KafkaConsumerProperties {
-			array := strings.Split(kv, "=")
-			if err := kafkaConfig.SetKey(array[0], array[1]); err != nil {
-				return err
-			}
-		}
+	if err := srv.updateKafkaConfig(kafkaConfig, srv.KafkaConsumerProperties); err != nil {
+		return err
 	}
 
 	consumer, err := kafka.NewConsumer(kafkaConfig)
@@ -446,33 +486,10 @@ func (srv *OnmsGrpcIpcServer) startConsumingForLocation(location string) error {
 					log.Printf("invalid message received: %v", err)
 					continue
 				}
-				srv.metricReceivedMessages.WithLabelValues(location).Inc()
-				srv.metricReceivedBytes.WithLabelValues(location).Add(float64(len(e.Value)))
-				log.Printf("processing RPC message %s", rpcMsg.RpcId)
-				srv.rpcDelayQueue.Store(rpcMsg.RpcId, rpcMsg.ExpirationTime)
-				rpcContent := rpcMsg.RpcContent
-				// For larger messages which get split into multiple chunks, cache them until all of them arrive
-				if rpcMsg.TotalChunks > 1 {
-					// Handle multiple chunks
-					if !srv.handleChunks(rpcMsg) {
-						continue
-					}
-					if data, ok := srv.messageCache.Load(rpcMsg.RpcId); ok {
-						rpcContent = data.([]byte)
-					}
-					// Remove rpcId from cache
-					srv.messageCache.Delete(rpcMsg.RpcId)
-					srv.currentChunkCache.Delete(rpcMsg.RpcId)
+				request := srv.createRPCRequest(location, rpcMsg)
+				if request != nil {
+					srv.sendRequest(location, request)
 				}
-				rpcRequest := &ipc.RpcRequestProto{
-					RpcId:          rpcMsg.RpcId,
-					ModuleId:       rpcMsg.ModuleId,
-					ExpirationTime: rpcMsg.ExpirationTime,
-					SystemId:       rpcMsg.SystemId,
-					Location:       location,
-					RpcContent:     rpcContent,
-				}
-				srv.sendRequest(location, rpcRequest)
 			case kafka.Error:
 				log.Printf("consumer error %v", e)
 				srv.metricReceivedErrors.WithLabelValues(location).Inc()
@@ -482,6 +499,35 @@ func (srv *OnmsGrpcIpcServer) startConsumingForLocation(location string) error {
 
 	srv.consumers[location] = consumer
 	return nil
+}
+
+func (srv *OnmsGrpcIpcServer) createRPCRequest(location string, rpcMsg *rpc.RpcMessageProto) *ipc.RpcRequestProto {
+	rpcContent := rpcMsg.RpcContent
+	srv.metricReceivedMessages.WithLabelValues(location).Inc()
+	srv.metricReceivedBytes.WithLabelValues(location).Add(float64(len(rpcContent)))
+	log.Printf("processing RPC message %s", rpcMsg.RpcId)
+	srv.rpcDelayQueue.Store(rpcMsg.RpcId, rpcMsg.ExpirationTime)
+	// For larger messages which get split into multiple chunks, cache them until all of them arrive
+	if rpcMsg.TotalChunks > 1 {
+		// Handle multiple chunks
+		if !srv.handleChunks(rpcMsg) {
+			return nil
+		}
+		if data, ok := srv.messageCache.Load(rpcMsg.RpcId); ok {
+			rpcContent = data.([]byte)
+		}
+		// Remove rpcId from cache
+		srv.messageCache.Delete(rpcMsg.RpcId)
+		srv.currentChunkCache.Delete(rpcMsg.RpcId)
+	}
+	return &ipc.RpcRequestProto{
+		RpcId:          rpcMsg.RpcId,
+		ModuleId:       rpcMsg.ModuleId,
+		ExpirationTime: rpcMsg.ExpirationTime,
+		SystemId:       rpcMsg.SystemId,
+		Location:       location,
+		RpcContent:     rpcContent,
+	}
 }
 
 func (srv *OnmsGrpcIpcServer) transformAndSendRPCMessage(msg *ipc.RpcResponseProto) {
@@ -508,7 +554,7 @@ func (srv *OnmsGrpcIpcServer) transformAndSendRPCMessage(msg *ipc.RpcResponsePro
 }
 
 func (srv *OnmsGrpcIpcServer) handleChunks(rpcMsg *rpc.RpcMessageProto) bool {
-	data, _ := srv.currentChunkCache.LoadOrStore(rpcMsg.RpcId, 0)
+	data, _ := srv.currentChunkCache.LoadOrStore(rpcMsg.RpcId, int32(0))
 	chunkNumber := data.(int32)
 	if chunkNumber != rpcMsg.CurrentChunkNumber {
 		log.Printf("expected chunk = %d but got chunk = %d, ignoring.", chunkNumber, rpcMsg.CurrentChunkNumber)
