@@ -112,9 +112,11 @@ func TestPropertiesFlag(t *testing.T) {
 
 func TestRoundRobinHandlerMap(t *testing.T) {
 	handlerMap := new(RoundRobinHandlerMap)
-	handlerMap.Add("001", &mockRPCStreamingServer{"H1"})
-	handlerMap.Add("002", &mockRPCStreamingServer{"H2"})
-	handlerMap.Add("003", &mockRPCStreamingServer{"H3"})
+	handlerMap.Set("001", &mockRPCStreamingServer{"H1"})
+	handlerMap.Set("002", &mockRPCStreamingServer{"H2"})
+	handlerMap.Set("003", &mockRPCStreamingServer{"H3"})
+	// Verify Size
+	assert.Equal(t, 3, len(handlerMap.handlerIDs))
 	// Verify round-robin logic
 	h := handlerMap.Get()
 	assert.Equal(t, 1, handlerMap.current)
@@ -128,6 +130,11 @@ func TestRoundRobinHandlerMap(t *testing.T) {
 	// Verify contains logic
 	assert.Assert(t, handlerMap.Contains("001"))
 	assert.Assert(t, !handlerMap.Contains("004"))
+	// Verify update
+	handlerMap.Set("003", &mockRPCStreamingServer{"H33"})
+	assert.Equal(t, 3, len(handlerMap.handlerIDs))
+	h = handlerMap.Find("003")
+	assert.Equal(t, "H33", h.Context().Value("id"))
 }
 
 func TestUpdateKafkaConfig(t *testing.T) {

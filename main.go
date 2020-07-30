@@ -88,15 +88,15 @@ type RoundRobinHandlerMap struct {
 	current    int
 }
 
-// Add adds a new handler to the round-robin map if it doesn't exist
-func (h *RoundRobinHandlerMap) Add(id string, handler ipc.OpenNMSIpc_RpcStreamingServer) {
+// Set adds or updates a handler to the round-robin map if it doesn't exist
+func (h *RoundRobinHandlerMap) Set(id string, handler ipc.OpenNMSIpc_RpcStreamingServer) {
 	if h.handlerMap == nil {
 		h.handlerMap = new(sync.Map)
 	}
 	if _, ok := h.handlerMap.Load(id); !ok {
-		h.handlerMap.Store(id, handler)
 		h.handlerIDs = append(h.handlerIDs, id)
 	}
+	h.handlerMap.Store(id, handler)
 }
 
 // Get obtain the next handler in a round-robin basis
@@ -109,6 +109,19 @@ func (h *RoundRobinHandlerMap) Get() ipc.OpenNMSIpc_RpcStreamingServer {
 		h.current = 0
 	}
 	if handler, ok := h.handlerMap.Load(h.handlerIDs[h.current]); ok {
+		if handler != nil {
+			return handler.(ipc.OpenNMSIpc_RpcStreamingServer)
+		}
+	}
+	return nil
+}
+
+// Find returns a given handler by its ID
+func (h *RoundRobinHandlerMap) Find(id string) ipc.OpenNMSIpc_RpcStreamingServer {
+	if h.handlerMap == nil {
+		return nil
+	}
+	if handler, ok := h.handlerMap.Load(id); ok {
 		if handler != nil {
 			return handler.(ipc.OpenNMSIpc_RpcStreamingServer)
 		}
@@ -444,7 +457,7 @@ func (srv *OnmsGrpcIpcServer) addRPCHandler(location string, systemID string, rp
 	obj, _ := srv.rpcHandlerByLocation.LoadOrStore(location, &RoundRobinHandlerMap{})
 	handlerMap := obj.(*RoundRobinHandlerMap)
 	if !handlerMap.Contains(systemID) {
-		handlerMap.Add(systemID, rpcHandler)
+		handlerMap.Set(systemID, rpcHandler)
 		srv.rpcHandlerByMinionID.Store(systemID, rpcHandler)
 		log.Printf("added RPC handler for minion %s at location %s", systemID, location)
 	}
