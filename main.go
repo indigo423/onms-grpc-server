@@ -456,11 +456,13 @@ func (srv *OnmsGrpcIpcServer) addRPCHandler(location string, systemID string, rp
 	}
 	obj, _ := srv.rpcHandlerByLocation.LoadOrStore(location, &RoundRobinHandlerMap{})
 	handlerMap := obj.(*RoundRobinHandlerMap)
-	if !handlerMap.Contains(systemID) {
-		handlerMap.Set(systemID, rpcHandler)
-		srv.rpcHandlerByMinionID.Store(systemID, rpcHandler)
-		log.Printf("added RPC handler for minion %s at location %s", systemID, location)
+	action := "added"
+	if handlerMap.Contains(systemID) {
+		action = "replaced"
 	}
+	log.Printf("%s RPC handler for minion %s at location %s", action, systemID, location)
+	handlerMap.Set(systemID, rpcHandler)
+	srv.rpcHandlerByMinionID.Store(systemID, rpcHandler)
 }
 
 func (srv *OnmsGrpcIpcServer) startConsumingForLocation(location string) error {

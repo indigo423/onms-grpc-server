@@ -260,6 +260,12 @@ func TestAddRPCHandler(t *testing.T) {
 	assert.Assert(t, ok)
 	h = obj.(ipc.OpenNMSIpc_RpcStreamingServer)
 	assert.Equal(t, "H3", h.Context().Value("id"))
+	// Verify replace handler
+	srv.addRPCHandler("Raleigh", "minion03", &mockRPCStreamingServer{"H33"})
+	obj, ok = raleigh.handlerMap.Load("minion03")
+	assert.Assert(t, ok)
+	h = obj.(ipc.OpenNMSIpc_RpcStreamingServer)
+	assert.Equal(t, "H33", h.Context().Value("id"))
 }
 
 func TestGetRPCHandler(t *testing.T) {
