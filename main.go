@@ -34,6 +34,7 @@ import (
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/health"
 	"google.golang.org/grpc/health/grpc_health_v1"
+	"google.golang.org/grpc/status"
 
 	"gopkg.in/confluentinc/confluent-kafka-go.v1/kafka"
 )
@@ -384,27 +385,37 @@ func (srv *OnmsGrpcIpcServer) Stop() {
 
 // SinkStreaming Streams Sink messages from Minion to OpenNMS (client-side streaming RPC)
 func (srv *OnmsGrpcIpcServer) SinkStreaming(stream ipc.OpenNMSIpc_SinkStreamingServer) error {
+	fmt.Println("starting Sink API stream")
 	for {
 		msg, err := stream.Recv()
 		if err == io.EOF {
-			return stream.SendAndClose(&ipc.Empty{})
+			break
 		}
 		if err != nil {
-			return err
+			if errStatus, ok := status.FromError(err); ok {
+				return status.Errorf(errStatus.Code(), "error while receiving Sink API data: %v ", errStatus.Message())
+			}
+			return fmt.Errorf("error while receiving Sink API data: %v", err)
 		}
 		srv.transformAndSendSinkMessage(msg)
 	}
+	log.Println("terminating Sink API stream")
+	return nil
 }
 
 // RpcStreaming Streams RPC messages between OpenNMS and Minion (bidirectional streaming RPC)
 func (srv *OnmsGrpcIpcServer) RpcStreaming(stream ipc.OpenNMSIpc_RpcStreamingServer) error {
+	fmt.Println("starting RPC API stream")
 	for {
 		msg, err := stream.Recv()
 		if err == io.EOF {
-			return nil
+			break
 		}
 		if err != nil {
-			return err
+			if errStatus, ok := status.FromError(err); ok {
+				return status.Errorf(errStatus.Code(), "error while receiving RPC API data: %v ", errStatus.Message())
+			}
+			return fmt.Errorf("error while receiving RPC API data: %v", err)
 		}
 		if srv.isHeaders(msg) {
 			srv.addRPCHandler(msg.Location, msg.SystemId, stream)
@@ -415,6 +426,8 @@ func (srv *OnmsGrpcIpcServer) RpcStreaming(stream ipc.OpenNMSIpc_RpcStreamingSer
 			srv.transformAndSendRPCMessage(msg)
 		}
 	}
+	fmt.Println("terminating RPC API stream")
+	return nil
 }
 
 // Sink API Methods
