@@ -11,7 +11,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"log"
 	"math"
 	"net"
 	"net/http"
@@ -25,18 +24,20 @@ import (
 	"github.com/agalue/onms-grpc-server/protobuf/rpc"
 	"github.com/agalue/onms-grpc-server/protobuf/sink"
 	"github.com/golang/protobuf/proto"
-
-	grpc_prometheus "github.com/grpc-ecosystem/go-grpc-prometheus"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/health"
 	"google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/status"
-
 	"gopkg.in/confluentinc/confluent-kafka-go.v1/kafka"
+
+	grpc_middleware "github.com/grpc-ecosystem/go-grpc-middleware"
+	grpc_zap "github.com/grpc-ecosystem/go-grpc-middleware/logging/zap"
+	grpc_prometheus "github.com/grpc-ecosystem/go-grpc-prometheus"
 )
 
 const (
@@ -151,11 +152,13 @@ type OnmsGrpcIpcServer struct {
 	TLSEnabled              bool
 	TLSCertFile             string
 	TLSKeyFile              string
+	Logger                  *zap.Logger
 
 	server    *grpc.Server
 	hs        *health.Server
 	producer  KafkaProducer
 	consumers map[string]KafkaConsumer
+	log       *zap.SugaredLogger
 
 	rpcHandlerByLocation sync.Map // key: location, value: RoundRobinHandlerMap
 	rpcHandlerByMinionID sync.Map // key: minion ID, value: gRPC handler
@@ -222,7 +225,7 @@ func (srv *OnmsGrpcIpcServer) initPrometheus() {
 	)
 
 	go func() {
-		log.Printf("starting Prometheus Metrics server %d\n", srv.HTTPPort)
+		srv.log.Infof("starting Prometheus Metrics server %d", srv.HTTPPort)
 		http.Handle("/metrics", promhttp.Handler())
 		http.ListenAndServe(fmt.Sprintf(":%d", srv.HTTPPort), nil)
 	}()
@@ -254,15 +257,15 @@ func (srv *OnmsGrpcIpcServer) initKafkaProducer() error {
 			case *kafka.Message:
 				if ev.TopicPartition.Error != nil {
 					srv.metricDeliveredErrors.WithLabelValues(*ev.TopicPartition.Topic).Inc()
-					log.Printf("delivery failed: %v\n", ev.TopicPartition)
+					srv.log.Errorf("kafka delivery failed: %v", ev.TopicPartition)
 				} else {
 					bytes := len(ev.Value)
 					srv.metricDeliveredMessages.WithLabelValues(*ev.TopicPartition.Topic).Inc()
 					srv.metricDeliveredBytes.WithLabelValues(*ev.TopicPartition.Topic).Add(float64(bytes))
-					log.Printf("delivered message of %d bytes with key %s to %v\n", bytes, ev.Key, ev.TopicPartition)
+					srv.log.Infof("kafka delivered message of %d bytes with key %s to %v", bytes, ev.Key, ev.TopicPartition)
 				}
 			default:
-				log.Printf("kafka event: %s\n", ev)
+				srv.log.Debugf("kafka event: %s", ev)
 			}
 		}
 	}()
@@ -280,7 +283,10 @@ func (srv *OnmsGrpcIpcServer) initGrpcServer() error {
 		}
 		options = append(options, grpc.Creds(creds))
 	}
-	options = append(options, grpc.StreamInterceptor(grpc_prometheus.StreamServerInterceptor))
+	options = append(options, grpc_middleware.WithStreamServerChain(
+		grpc_zap.StreamServerInterceptor(srv.Logger),
+		grpc_prometheus.StreamServerInterceptor,
+	))
 	srv.server = grpc.NewServer(options...)
 	srv.hs = health.NewServer()
 
@@ -289,7 +295,7 @@ func (srv *OnmsGrpcIpcServer) initGrpcServer() error {
 	grpc_health_v1.RegisterHealthServer(srv.server, srv.hs)
 	grpc_prometheus.Register(srv.server)
 	jsonBytes, _ := json.MarshalIndent(srv.server.GetServiceInfo(), "", "  ")
-	log.Printf("gRPC server info: %s", string(jsonBytes))
+	srv.log.Infof("gRPC server info: %s", string(jsonBytes))
 
 	// Initialize TCP Listener
 	listener, err := net.Listen("tcp", fmt.Sprintf(":%d", srv.GrpcPort))
@@ -299,9 +305,9 @@ func (srv *OnmsGrpcIpcServer) initGrpcServer() error {
 
 	// Start gRPC Server
 	go func() {
-		log.Printf("starting gRPC server on port %d\n", srv.GrpcPort)
+		srv.log.Infof("starting gRPC server on port %d", srv.GrpcPort)
 		if err = srv.server.Serve(listener); err != nil {
-			log.Fatalf("could not serve: %v", err)
+			srv.log.Fatalf("could not serve: %v", err)
 		}
 	}()
 
@@ -315,7 +321,7 @@ func (srv *OnmsGrpcIpcServer) initDelayQueueProcessor() {
 				rpcID := key.(string)
 				expiration := value.(uint64)
 				if uint64(now.Unix()) > expiration {
-					log.Printf("RPC message %s expired", rpcID)
+					srv.log.Warnf("RPC message %s expired", rpcID)
 					srv.metricExpiredMessages.Inc()
 					srv.rpcDelayQueue.Delete(rpcID)
 					srv.messageCache.Delete(rpcID)
@@ -343,13 +349,16 @@ func (srv *OnmsGrpcIpcServer) updateKafkaConfig(cfg *kafka.ConfigMap, properties
 func (srv *OnmsGrpcIpcServer) Start() error {
 	var err error
 
-	// Silently ignore if producer was already initialized
 	if srv.server != nil {
-		return nil
+		return nil // Silently ignore if producer was already initialized
 	}
+	if srv.Logger == nil {
+		return fmt.Errorf("zap logger not initialized")
+	}
+	srv.log = srv.Logger.Sugar()
 
 	jsonBytes, _ := json.MarshalIndent(srv, "", "  ")
-	log.Printf("initializing gRPC server: %s", string(jsonBytes))
+	srv.log.Infof("initializing gRPC server: %s", string(jsonBytes))
 
 	srv.initVariables()
 	if err = srv.initKafkaProducer(); err != nil {
@@ -365,7 +374,7 @@ func (srv *OnmsGrpcIpcServer) Start() error {
 
 // Stop gracefully stop the gRPC server and the Kafka Producer/Consumer instances
 func (srv *OnmsGrpcIpcServer) Stop() {
-	log.Println("shutting down...")
+	srv.log.Warnf("shutting down...")
 	if srv.server != nil {
 		srv.server.Stop()
 	}
@@ -378,14 +387,14 @@ func (srv *OnmsGrpcIpcServer) Stop() {
 	for _, consumer := range srv.consumers {
 		consumer.Close()
 	}
-	log.Println("done!")
+	srv.log.Infof("done!")
 }
 
 // Main gRPC Methods
 
 // SinkStreaming Streams Sink messages from Minion to OpenNMS (client-side streaming RPC)
 func (srv *OnmsGrpcIpcServer) SinkStreaming(stream ipc.OpenNMSIpc_SinkStreamingServer) error {
-	fmt.Println("starting Sink API stream")
+	srv.log.Infof("starting Sink API stream")
 	for {
 		msg, err := stream.Recv()
 		if err == io.EOF {
@@ -399,13 +408,13 @@ func (srv *OnmsGrpcIpcServer) SinkStreaming(stream ipc.OpenNMSIpc_SinkStreamingS
 		}
 		srv.transformAndSendSinkMessage(msg)
 	}
-	log.Println("terminating Sink API stream")
+	srv.log.Warnf("terminating Sink API stream")
 	return nil
 }
 
 // RpcStreaming Streams RPC messages between OpenNMS and Minion (bidirectional streaming RPC)
 func (srv *OnmsGrpcIpcServer) RpcStreaming(stream ipc.OpenNMSIpc_RpcStreamingServer) error {
-	fmt.Println("starting RPC API stream")
+	srv.log.Infof("starting RPC API stream")
 	for {
 		msg, err := stream.Recv()
 		if err == io.EOF {
@@ -420,13 +429,13 @@ func (srv *OnmsGrpcIpcServer) RpcStreaming(stream ipc.OpenNMSIpc_RpcStreamingSer
 		if srv.isHeaders(msg) {
 			srv.addRPCHandler(msg.Location, msg.SystemId, stream)
 			if err := srv.startConsumingForLocation(msg.Location); err != nil {
-				log.Printf("error: %v", err)
+				srv.log.Errorf("cannot start consuming from location %s: %v", msg.Location, err)
 			}
 		} else {
 			srv.transformAndSendRPCMessage(msg)
 		}
 	}
-	fmt.Println("terminating RPC API stream")
+	srv.log.Warnf("terminating RPC API stream")
 	return nil
 }
 
@@ -445,7 +454,7 @@ func (srv *OnmsGrpcIpcServer) transformAndSendSinkMessage(msg *ipc.SinkMessage) 
 			Content:            data,
 		}
 		if bytes, err := proto.Marshal(sinkMsg); err != nil {
-			log.Printf("error cannot serialize sink message: %v\n", err)
+			srv.log.Errorf("cannot serialize sink message: %v", err)
 		} else {
 			srv.sendToKafka(srv.getSinkTopic(msg.ModuleId), msg.MessageId, bytes)
 		}
@@ -464,7 +473,7 @@ func (srv *OnmsGrpcIpcServer) isHeaders(msg *ipc.RpcResponseProto) bool {
 
 func (srv *OnmsGrpcIpcServer) addRPCHandler(location string, systemID string, rpcHandler ipc.OpenNMSIpc_RpcStreamingServer) {
 	if location == "" || systemID == "" {
-		log.Printf("invalid metadata received with location = '%s', systemId = '%s'", location, systemID)
+		srv.log.Errorf("invalid metadata received with location = '%s', systemId = '%s'", location, systemID)
 		return
 	}
 	obj, _ := srv.rpcHandlerByLocation.LoadOrStore(location, &RoundRobinHandlerMap{})
@@ -473,7 +482,7 @@ func (srv *OnmsGrpcIpcServer) addRPCHandler(location string, systemID string, rp
 	if handlerMap.Contains(systemID) {
 		action = "replaced"
 	}
-	log.Printf("%s RPC handler for minion %s at location %s", action, systemID, location)
+	srv.log.Infof("%s RPC handler for minion %s at location %s", action, systemID, location)
 	handlerMap.Set(systemID, rpcHandler)
 	srv.rpcHandlerByMinionID.Store(systemID, rpcHandler)
 }
@@ -501,17 +510,17 @@ func (srv *OnmsGrpcIpcServer) startConsumingForLocation(location string) error {
 	if err := consumer.Subscribe(topic, nil); err != nil {
 		return fmt.Errorf("cannot subscribe to topic %s: %v", topic, err)
 	}
-	log.Printf("subscribed to topic %s", topic)
+	srv.log.Infof("subscribed to topic %s", topic)
 
 	go func() {
-		log.Printf("starting RPC consumer for location %s", location)
+		srv.log.Infof("starting RPC consumer for location %s", location)
 		for {
 			event := consumer.Poll(100)
 			switch e := event.(type) {
 			case *kafka.Message:
 				rpcMsg := &rpc.RpcMessageProto{}
 				if err := proto.Unmarshal(e.Value, rpcMsg); err != nil {
-					log.Printf("invalid message received: %v", err)
+					srv.log.Warnf("invalid message received: %v", err)
 					continue
 				}
 				request := srv.createRPCRequest(location, rpcMsg)
@@ -519,7 +528,7 @@ func (srv *OnmsGrpcIpcServer) startConsumingForLocation(location string) error {
 					srv.sendRequest(location, request)
 				}
 			case kafka.Error:
-				log.Printf("consumer error %v", e)
+				srv.log.Errorf("kafka consumer error %v", e)
 				srv.metricReceivedErrors.WithLabelValues(location).Inc()
 			}
 		}
@@ -533,7 +542,7 @@ func (srv *OnmsGrpcIpcServer) createRPCRequest(location string, rpcMsg *rpc.RpcM
 	rpcContent := rpcMsg.RpcContent
 	srv.metricReceivedMessages.WithLabelValues(location).Inc()
 	srv.metricReceivedBytes.WithLabelValues(location).Add(float64(len(rpcContent)))
-	log.Printf("processing RPC message %s", rpcMsg.RpcId)
+	srv.log.Infof("processing RPC message %s", rpcMsg.RpcId)
 	srv.rpcDelayQueue.Store(rpcMsg.RpcId, rpcMsg.ExpirationTime)
 	// For larger messages which get split into multiple chunks, cache them until all of them arrive
 	if rpcMsg.TotalChunks > 1 {
@@ -574,7 +583,7 @@ func (srv *OnmsGrpcIpcServer) transformAndSendRPCMessage(msg *ipc.RpcResponsePro
 			TracingInfo:        msg.TracingInfo,
 		}
 		if bytes, err := proto.Marshal(rpcMsg); err != nil {
-			log.Printf("error cannot serialize sink message: %v", err)
+			srv.log.Errorf("cannot serialize RPC message: %v", err)
 		} else {
 			srv.sendToKafka(srv.getResponseTopic(), msg.RpcId, bytes)
 		}
@@ -585,7 +594,7 @@ func (srv *OnmsGrpcIpcServer) handleChunks(rpcMsg *rpc.RpcMessageProto) bool {
 	data, _ := srv.currentChunkCache.LoadOrStore(rpcMsg.RpcId, int32(0))
 	chunkNumber := data.(int32)
 	if chunkNumber != rpcMsg.CurrentChunkNumber {
-		log.Printf("expected chunk = %d but got chunk = %d, ignoring.", chunkNumber, rpcMsg.CurrentChunkNumber)
+		srv.log.Warnf("expected chunk = %d but got chunk = %d, ignoring.", chunkNumber, rpcMsg.CurrentChunkNumber)
 		return false
 	}
 	data, _ = srv.messageCache.LoadOrStore(rpcMsg.RpcId, make([]byte, 0))
@@ -614,16 +623,16 @@ func (srv *OnmsGrpcIpcServer) getRPCHandler(location string, systemID string) ip
 func (srv *OnmsGrpcIpcServer) sendRequest(location string, rpcRequest *ipc.RpcRequestProto) {
 	stream := srv.getRPCHandler(location, rpcRequest.SystemId)
 	if stream == nil {
-		log.Printf("no RPC handler found for location %s", location)
+		srv.log.Warnf("no RPC handler found for location %s", location)
 		return
 	}
 	if rpcRequest.SystemId == "" {
-		log.Printf("sending gRPC request %s for location %s", rpcRequest.RpcId, location)
+		srv.log.Debugf("sending gRPC request %s for location %s", rpcRequest.RpcId, location)
 	} else {
-		log.Printf("sending gRPC request %s to minion %s for location %s", rpcRequest.RpcId, rpcRequest.SystemId, location)
+		srv.log.Debugf("sending gRPC request %s to minion %s for location %s", rpcRequest.RpcId, rpcRequest.SystemId, location)
 	}
 	if err := stream.SendMsg(rpcRequest); err != nil {
-		log.Printf("error while sending RPC request: %v", err)
+		srv.log.Errorf("cannot send RPC request: %v", err)
 	}
 }
 
@@ -670,13 +679,14 @@ func (srv *OnmsGrpcIpcServer) sendToKafka(topic string, key string, value []byte
 		Value:          value,
 	}
 	if err := srv.producer.Produce(msg, nil); err != nil {
-		log.Printf("error while sending message %s to topic %s: %v", key, topic, err)
+		srv.log.Errorf("cannot send message with key %s to topic %s: %v", key, topic, err)
 	}
 }
 
 // Main Method
 
 func main() {
+	var logLevel string
 	srv := &OnmsGrpcIpcServer{}
 	flag.IntVar(&srv.GrpcPort, "port", defaultGrpcPort, "gRPC Server Listener Port")
 	flag.IntVar(&srv.HTTPPort, "http-port", defaultHTTPPort, "HTTP Server Listener Port (Prometheus Metrics)")
@@ -688,10 +698,48 @@ func main() {
 	flag.StringVar(&srv.TLSCertFile, "tls-cert", "", "Path to the TLS Certificate file")
 	flag.StringVar(&srv.TLSKeyFile, "tls-key", "", "Path to the TLS Key file")
 	flag.BoolVar(&srv.TLSEnabled, "tls-enabled", false, "Enable TLS for the gRPC Server")
+	flag.StringVar(&logLevel, "log-level", "info", "Log Level")
 	flag.Parse()
 
+	level := zap.NewAtomicLevel()
+	switch strings.ToLower(logLevel) {
+	case "debug":
+		level.SetLevel(zap.DebugLevel)
+	case "info":
+		level.SetLevel(zap.InfoLevel)
+	case "warn":
+		level.SetLevel(zap.WarnLevel)
+	case "error":
+		level.SetLevel(zap.ErrorLevel)
+	}
+	config := zap.Config{
+		Level:             level,
+		Development:       false,
+		DisableStacktrace: true,
+		Encoding:          "console",
+		EncoderConfig: zapcore.EncoderConfig{
+			TimeKey:        "ts",
+			LevelKey:       "level",
+			NameKey:        "logger",
+			MessageKey:     "msg",
+			CallerKey:      "caller",
+			LineEnding:     zapcore.DefaultLineEnding,
+			EncodeLevel:    zapcore.CapitalColorLevelEncoder,
+			EncodeTime:     zapcore.ISO8601TimeEncoder,
+			EncodeDuration: zapcore.StringDurationEncoder,
+			EncodeCaller:   zapcore.ShortCallerEncoder,
+		},
+		OutputPaths:      []string{"stdout"},
+		ErrorOutputPaths: []string{"stderr"},
+	}
+	var err error
+	srv.Logger, err = config.Build()
+	if err != nil {
+		panic(err)
+	}
+
 	if err := srv.Start(); err != nil {
-		log.Fatal(err)
+		srv.Logger.Fatal(err.Error())
 	}
 
 	stop := make(chan os.Signal, 1)
