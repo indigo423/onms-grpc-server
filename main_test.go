@@ -9,6 +9,7 @@ import (
 	"github.com/agalue/onms-grpc-server/protobuf/rpc"
 	"github.com/agalue/onms-grpc-server/protobuf/sink"
 	"github.com/golang/protobuf/proto"
+	"go.uber.org/zap"
 	"google.golang.org/grpc/metadata"
 	"gopkg.in/confluentinc/confluent-kafka-go.v1/kafka"
 	"gotest.tools/assert"
@@ -444,14 +445,17 @@ func createMockServer() (*OnmsGrpcIpcServer, *mockProducer, *mockConsumer) {
 	}
 	consumers := make(map[string]KafkaConsumer)
 	consumers["Test"] = consumer
+	logger, _ := zap.NewDevelopment()
 	srv := &OnmsGrpcIpcServer{
 		OnmsInstanceID: "OpenNMS",
 		GrpcPort:       defaultGrpcPort,
 		HTTPPort:       defaultHTTPPort,
 		MaxBufferSize:  defaultMaxByfferSize,
+		Logger:         logger,
 		producer:       producer,
 		consumers:      consumers,
 	}
 	srv.initVariables()
+	srv.log = srv.Logger.Sugar()
 	return srv, producer, consumer
 }
