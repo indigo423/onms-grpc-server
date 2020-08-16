@@ -53,8 +53,8 @@ const (
 	defaultInstanceID            = "OpenNMS"
 )
 
-// KafkaConsumer creates an generic interface with the relevant methods from kafka.Consumer
-// This allows to use a mock implementation for testing purposes
+// KafkaConsumer represents an generic interface with the relevant methods from kafka.Consumer.
+// This allows to use a mock implementation for testing purposes.
 type KafkaConsumer interface {
 	Subscribe(topic string, rebalanceCb kafka.RebalanceCb) error
 	Poll(timeoutMs int) (event kafka.Event)
@@ -62,8 +62,8 @@ type KafkaConsumer interface {
 	Close() error
 }
 
-// KafkaProducer creates an generic interface with the relevant methods from kafka.Producer
-// This allows to use a mock implementation for testing purposes
+// KafkaProducer represents an generic interface with the relevant methods from kafka.Producer.
+// This allows to use a mock implementation for testing purposes.
 type KafkaProducer interface {
 	Produce(msg *kafka.Message, deliveryChan chan kafka.Event) error
 	Events() chan kafka.Event
@@ -90,7 +90,7 @@ type RoundRobinHandlerMap struct {
 	current    int
 }
 
-// Set adds or updates a handler to the round-robin map if it doesn't exist
+// Set adds a new handler to the round-robin map or updates it if exist
 func (h *RoundRobinHandlerMap) Set(id string, handler ipc.OpenNMSIpc_RpcStreamingServer) {
 	if h.handlerMap == nil {
 		h.handlerMap = new(sync.Map)
@@ -101,7 +101,7 @@ func (h *RoundRobinHandlerMap) Set(id string, handler ipc.OpenNMSIpc_RpcStreamin
 	h.handlerMap.Store(id, handler)
 }
 
-// Get obtain the next handler in a round-robin basis
+// Get obtains the next handler in a round-robin basis
 func (h *RoundRobinHandlerMap) Get() ipc.OpenNMSIpc_RpcStreamingServer {
 	if h.handlerMap == nil {
 		return nil
@@ -140,7 +140,8 @@ func (h *RoundRobinHandlerMap) Contains(id string) bool {
 	return ok
 }
 
-// OnmsGrpcIpcServer represents an OpenNMS gRPC Server instance
+// OnmsGrpcIpcServer represents an OpenNMS IPC gRPC Server instance.
+// It requires Kafka configured with single-topic for RPC API requests.
 type OnmsGrpcIpcServer struct {
 	GrpcPort                int
 	HTTPPort                int
@@ -160,8 +161,8 @@ type OnmsGrpcIpcServer struct {
 	consumers map[string]KafkaConsumer
 	log       *zap.SugaredLogger
 
-	rpcHandlerByLocation sync.Map // key: location, value: RoundRobinHandlerMap
-	rpcHandlerByMinionID sync.Map // key: minion ID, value: gRPC handler
+	rpcHandlerByLocation sync.Map // key: location, value: RoundRobinHandlerMap of RPC handlers by ID
+	rpcHandlerByMinionID sync.Map // key: minion ID, value: RPC handler
 	currentChunkCache    sync.Map // key: RPC message ID, value: current chunk number
 	messageCache         sync.Map // key: RPC message ID, value: byte slice
 	rpcDelayQueue        sync.Map // key: RPC message ID, value: RPC expiration time
@@ -213,6 +214,7 @@ func (srv *OnmsGrpcIpcServer) initVariables() {
 	})
 }
 
+// Registers the prometheus metrics and starts the HTTP server
 func (srv *OnmsGrpcIpcServer) initPrometheus() {
 	prometheus.MustRegister(
 		srv.metricDeliveredErrors,
@@ -231,6 +233,7 @@ func (srv *OnmsGrpcIpcServer) initPrometheus() {
 	}()
 }
 
+// Initializes the Kafka producer
 func (srv *OnmsGrpcIpcServer) initKafkaProducer() error {
 	var err error
 
@@ -273,6 +276,7 @@ func (srv *OnmsGrpcIpcServer) initKafkaProducer() error {
 	return nil
 }
 
+// Initializes the gRPC Server
 func (srv *OnmsGrpcIpcServer) initGrpcServer() error {
 	// Initialize gRPC Server
 	options := make([]grpc.ServerOption, 0)
@@ -314,6 +318,7 @@ func (srv *OnmsGrpcIpcServer) initGrpcServer() error {
 	return nil
 }
 
+// Initializes a goroutine to cleanup expired RPC messages from the caches.
 func (srv *OnmsGrpcIpcServer) initDelayQueueProcessor() {
 	go func() {
 		for now := range time.Tick(time.Second) {
@@ -333,6 +338,7 @@ func (srv *OnmsGrpcIpcServer) initDelayQueueProcessor() {
 	}()
 }
 
+// Updates the Kafka configuration map with a list of property flags
 func (srv *OnmsGrpcIpcServer) updateKafkaConfig(cfg *kafka.ConfigMap, properties PropertiesFlag) error {
 	if properties != nil {
 		for _, kv := range properties {
@@ -345,7 +351,7 @@ func (srv *OnmsGrpcIpcServer) updateKafkaConfig(cfg *kafka.ConfigMap, properties
 	return nil
 }
 
-// Start initiates the gRPC server and the Kafka Producer instances
+// Start initiates the gRPC server and the Kafka Producer instances.
 func (srv *OnmsGrpcIpcServer) Start() error {
 	var err error
 
@@ -372,7 +378,7 @@ func (srv *OnmsGrpcIpcServer) Start() error {
 	return nil
 }
 
-// Stop gracefully stop the gRPC server and the Kafka Producer/Consumer instances
+// Stop gracefully stops the gRPC server and the Kafka Producer/Consumer instances.
 func (srv *OnmsGrpcIpcServer) Stop() {
 	srv.log.Warnf("shutting down...")
 	if srv.server != nil {
@@ -392,7 +398,7 @@ func (srv *OnmsGrpcIpcServer) Stop() {
 
 // Main gRPC Methods
 
-// SinkStreaming Streams Sink messages from Minion to OpenNMS (client-side streaming RPC)
+// SinkStreaming streams Sink API messages from Minion to OpenNMS (client-side streaming gRPC).
 func (srv *OnmsGrpcIpcServer) SinkStreaming(stream ipc.OpenNMSIpc_SinkStreamingServer) error {
 	srv.log.Infof("starting Sink API stream")
 	for {
@@ -412,7 +418,7 @@ func (srv *OnmsGrpcIpcServer) SinkStreaming(stream ipc.OpenNMSIpc_SinkStreamingS
 	return nil
 }
 
-// RpcStreaming Streams RPC messages between OpenNMS and Minion (bidirectional streaming RPC)
+// RpcStreaming streams RPC API messages between OpenNMS and Minion (bidirectional streaming gRPC).
 func (srv *OnmsGrpcIpcServer) RpcStreaming(stream ipc.OpenNMSIpc_RpcStreamingServer) error {
 	srv.log.Infof("starting RPC API stream")
 	for {
@@ -422,9 +428,9 @@ func (srv *OnmsGrpcIpcServer) RpcStreaming(stream ipc.OpenNMSIpc_RpcStreamingSer
 		}
 		if err != nil {
 			if errStatus, ok := status.FromError(err); ok {
-				return status.Errorf(errStatus.Code(), "error while receiving RPC API data: %v ", errStatus.Message())
+				return status.Errorf(errStatus.Code(), "cannot receive RPC API response: %v ", errStatus.Message())
 			}
-			return fmt.Errorf("error while receiving RPC API data: %v", err)
+			return fmt.Errorf("cannot receive RPC API response: %v", err)
 		}
 		if srv.isHeaders(msg) {
 			srv.addRPCHandler(msg.Location, msg.SystemId, stream)
@@ -441,6 +447,7 @@ func (srv *OnmsGrpcIpcServer) RpcStreaming(stream ipc.OpenNMSIpc_RpcStreamingSer
 
 // Sink API Methods
 
+// Transforms IPC SinkMessage into a set of Sink API SinkMessages and send them to Kafka.
 func (srv *OnmsGrpcIpcServer) transformAndSendSinkMessage(msg *ipc.SinkMessage) {
 	totalChunks := srv.getTotalChunks(msg.Content)
 	for chunk := int32(0); chunk < totalChunks; chunk++ {
@@ -461,16 +468,20 @@ func (srv *OnmsGrpcIpcServer) transformAndSendSinkMessage(msg *ipc.SinkMessage) 
 	}
 }
 
+// Builds the Sink API topic for agiven module.
 func (srv *OnmsGrpcIpcServer) getSinkTopic(module string) string {
 	return fmt.Sprintf(sinkTopicNameWithoutLocation, srv.OnmsInstanceID, sinkModulePrefix, module)
 }
 
 // RPC API Methods
 
+// Checks whether or not the RPC API Response is a header message.
 func (srv *OnmsGrpcIpcServer) isHeaders(msg *ipc.RpcResponseProto) bool {
 	return msg.SystemId != "" && msg.RpcId == msg.SystemId
 }
 
+// Registers a new RPC API handler for a given location and system ID (or Minion ID).
+// It replaces the existing one if there is any.
 func (srv *OnmsGrpcIpcServer) addRPCHandler(location string, systemID string, rpcHandler ipc.OpenNMSIpc_RpcStreamingServer) {
 	if location == "" || systemID == "" {
 		srv.log.Errorf("invalid metadata received with location = '%s', systemId = '%s'", location, systemID)
@@ -487,6 +498,9 @@ func (srv *OnmsGrpcIpcServer) addRPCHandler(location string, systemID string, rp
 	srv.rpcHandlerByMinionID.Store(systemID, rpcHandler)
 }
 
+// Initializes a new goroutine with a Kafka consumer for a given location.
+// Should be called once after registering the RPC API handler for the same location.
+// Consumer is not initialized if there is already one.
 func (srv *OnmsGrpcIpcServer) startConsumingForLocation(location string) error {
 	if srv.consumers[location] != nil {
 		return nil
@@ -538,6 +552,8 @@ func (srv *OnmsGrpcIpcServer) startConsumingForLocation(location string) error {
 	return nil
 }
 
+// Transforms RPC API Message into a set of IPC RPC Messages after all the chunks were processed.
+// Returns nil if the message is incomplete.
 func (srv *OnmsGrpcIpcServer) createRPCRequest(location string, rpcMsg *rpc.RpcMessageProto) *ipc.RpcRequestProto {
 	rpcContent := rpcMsg.RpcContent
 	srv.metricReceivedMessages.WithLabelValues(location).Inc()
@@ -567,6 +583,7 @@ func (srv *OnmsGrpcIpcServer) createRPCRequest(location string, rpcMsg *rpc.RpcM
 	}
 }
 
+// Transforms IPC RPC Response Message into a set of RPC API Messages and send them to Kafka.
 func (srv *OnmsGrpcIpcServer) transformAndSendRPCMessage(msg *ipc.RpcResponseProto) {
 	totalChunks := srv.getTotalChunks(msg.RpcContent)
 	for chunk := int32(0); chunk < totalChunks; chunk++ {
@@ -590,6 +607,8 @@ func (srv *OnmsGrpcIpcServer) transformAndSendRPCMessage(msg *ipc.RpcResponsePro
 	}
 }
 
+// Processes the chunks of a given RPC API Message.
+// Returns true when all the chunks have been processed.
 func (srv *OnmsGrpcIpcServer) handleChunks(rpcMsg *rpc.RpcMessageProto) bool {
 	data, _ := srv.currentChunkCache.LoadOrStore(rpcMsg.RpcId, int32(0))
 	chunkNumber := data.(int32)
@@ -604,6 +623,7 @@ func (srv *OnmsGrpcIpcServer) handleChunks(rpcMsg *rpc.RpcMessageProto) bool {
 	return rpcMsg.TotalChunks == chunkNumber
 }
 
+// Obtains the IPC RPC Handler for a given location or systemID when present.
 func (srv *OnmsGrpcIpcServer) getRPCHandler(location string, systemID string) ipc.OpenNMSIpc_RpcStreamingServer {
 	if systemID != "" {
 		stream, _ := srv.rpcHandlerByMinionID.Load(systemID)
@@ -620,6 +640,7 @@ func (srv *OnmsGrpcIpcServer) getRPCHandler(location string, systemID string) ip
 	return handlerMap.Get()
 }
 
+// Forwards the IPC RPC request to the appropriate stream handler.
 func (srv *OnmsGrpcIpcServer) sendRequest(location string, rpcRequest *ipc.RpcRequestProto) {
 	stream := srv.getRPCHandler(location, rpcRequest.SystemId)
 	if stream == nil {
@@ -636,10 +657,12 @@ func (srv *OnmsGrpcIpcServer) sendRequest(location string, rpcRequest *ipc.RpcRe
 	}
 }
 
+// Gets the RPC Request Topic for a given location
 func (srv *OnmsGrpcIpcServer) getRequestTopicAtLocation(location string) string {
 	return fmt.Sprintf(topicNameAtLocation, srv.OnmsInstanceID, location, rpcRequestTopicName)
 }
 
+// Gets the RPC Response Topic
 func (srv *OnmsGrpcIpcServer) getResponseTopic() string {
 	return fmt.Sprintf(topicNameWithoutLocation, srv.OnmsInstanceID, rpcResponseTopicName)
 }
