@@ -29,6 +29,7 @@ import (
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/health"
 	"google.golang.org/grpc/health/grpc_health_v1"
@@ -410,7 +411,7 @@ func (srv *OnmsGrpcIpcServer) SinkStreaming(stream ipc.OpenNMSIpc_SinkStreamingS
 			if errStatus, ok := status.FromError(err); ok {
 				return status.Errorf(errStatus.Code(), "error while receiving Sink API data: %v ", errStatus.Message())
 			}
-			return fmt.Errorf("error while receiving Sink API data: %v", err)
+			return status.Errorf(codes.Unknown, "error while receiving Sink API data: %v", err)
 		}
 		srv.transformAndSendSinkMessage(msg)
 	}
@@ -430,7 +431,7 @@ func (srv *OnmsGrpcIpcServer) RpcStreaming(stream ipc.OpenNMSIpc_RpcStreamingSer
 			if errStatus, ok := status.FromError(err); ok {
 				return status.Errorf(errStatus.Code(), "cannot receive RPC API response: %v ", errStatus.Message())
 			}
-			return fmt.Errorf("cannot receive RPC API response: %v", err)
+			return status.Errorf(codes.Unknown, "cannot receive RPC API response: %v", err)
 		}
 		if srv.isHeaders(msg) {
 			srv.addRPCHandler(msg.Location, msg.SystemId, stream)
