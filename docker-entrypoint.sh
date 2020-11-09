@@ -23,7 +23,7 @@ do
     key=$(get_key $env_var)
     echo "[configuring producer] key: $key"
     val=${!env_var}
-    echo "[configuring producer] '$key'='$val'"
+    echo "[configuring producer] value: $val"
     PRODUCDER+=(-producer-cfg "$key=$val")
   fi
 done
