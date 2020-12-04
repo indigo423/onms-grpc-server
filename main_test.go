@@ -174,7 +174,7 @@ func TestTransformAndSendSinkMessageSingle(t *testing.T) {
 	received := producer.messages[0]
 	sinkReceived := &sink.SinkMessage{}
 	proto.Unmarshal(received.Value, sinkReceived)
-	assert.Equal(t, msg.MessageId, *sinkReceived.MessageId)
+	assert.Equal(t, msg.MessageId, sinkReceived.MessageId)
 	assert.Equal(t, string(msg.Content), string(sinkReceived.Content))
 }
 

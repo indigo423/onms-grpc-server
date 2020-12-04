@@ -456,9 +456,9 @@ func (srv *OnmsGrpcIpcServer) transformAndSendSinkMessage(msg *ipc.SinkMessage) 
 		offset := chunk * srv.getMaxBufferSize()
 		data := msg.Content[offset : offset+bufferSize]
 		sinkMsg := &sink.SinkMessage{
-			MessageId:          &msg.MessageId,
-			CurrentChunkNumber: &chunk,
-			TotalChunks:        &totalChunks,
+			MessageId:          msg.MessageId,
+			CurrentChunkNumber: chunk,
+			TotalChunks:        totalChunks,
 			Content:            data,
 		}
 		if bytes, err := proto.Marshal(sinkMsg); err != nil {
