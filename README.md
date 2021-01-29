@@ -7,7 +7,7 @@ The gRPC IPC Server acts as a bridge between minions running gRPC IPC strategy a
 
 ## Compile:
 
-Make sure to have Go 1.14 installed on your system.
+To compile directly on your machine, Make sure to have at least Go 1.14 installed on your system.
 
 ```
 go build
@@ -59,3 +59,7 @@ docker run -d --name grpc-server \
 ```
 
 > The HTTP port is for accessing metrics in Prometheus format
+
+## Pending
+
+* Implement certificate-based client authentication.
