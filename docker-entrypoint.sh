@@ -24,7 +24,7 @@ do
     echo "[configuring producer] key: $key"
     val=${!env_var}
     echo "[configuring producer] value: $val"
-    PRODUCDER+=(-producer-cfg "$key=$val")
+    PRODUCER+=(-producer-cfg "$key=$val")
   fi
 done
 
@@ -54,4 +54,4 @@ if [ ! -z "${MAX_BUFFER_SIZE}" ]; then
   OPTIONS+=(-max-buffer-size "${MAX_BUFFER_SIZE}")
 fi
 
-exec /onms-grpc-server ${OPTIONS[@]} ${PRODUCDER[@]} ${CONSUMER[@]}
+exec /onms-grpc-server ${OPTIONS[@]} ${PRODUCER[@]} ${CONSUMER[@]}
