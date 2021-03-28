@@ -7,7 +7,7 @@ The gRPC IPC Server acts as a bridge between minions running gRPC IPC strategy a
 
 ## Compile:
 
-To compile directly on your machine, Make sure to have at least Go 1.16 installed on your system.
+To compile directly on your machine, Make sure to have at least Go 1.16 and the latest [librdkafka](https://github.com/edenhill/librdkafka) installed on your system.
 
 ```
 go build
@@ -22,9 +22,11 @@ docker build -t agalue/onms-grpc-server .
 ## Prerequisites
 
 * Minions running GRPC strategy.
-* OpenNMS running Kafka strategy with single topic.
+* OpenNMS running Kafka strategy with `single-topic` enabled.
 
 ## Start the server
+
+Make sure the latest [librdkafka](https://github.com/edenhill/librdkafka) installed on your system.
 
 ```bash
 ./onms-grpc-server \
