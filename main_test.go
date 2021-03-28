@@ -12,7 +12,7 @@ import (
 	"go.uber.org/zap"
 	"google.golang.org/grpc/metadata"
 	"gopkg.in/confluentinc/confluent-kafka-go.v1/kafka"
-	"gotest.tools/assert"
+	"gotest.tools/v3/assert"
 )
 
 // Mock Interfaces
