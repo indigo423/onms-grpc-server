@@ -144,6 +144,8 @@ func (h *RoundRobinHandlerMap) Contains(id string) bool {
 // OnmsGrpcIpcServer represents an OpenNMS IPC gRPC Server instance.
 // It requires Kafka configured with single-topic for RPC API requests.
 type OnmsGrpcIpcServer struct {
+	ipc.UnimplementedOpenNMSIpcServer
+
 	GrpcPort                int
 	HTTPPort                int
 	KafkaBootstrap          string
