@@ -11,7 +11,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"math"
 	"net"
 	"net/http"
 	"os"
@@ -23,7 +22,7 @@ import (
 	"github.com/agalue/onms-grpc-server/protobuf/ipc"
 	"github.com/agalue/onms-grpc-server/protobuf/rpc"
 	"github.com/agalue/onms-grpc-server/protobuf/sink"
-	"github.com/golang/protobuf/proto"
+	"github.com/confluentinc/confluent-kafka-go/kafka"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.uber.org/zap"
@@ -34,7 +33,7 @@ import (
 	"google.golang.org/grpc/health"
 	"google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/status"
-	"gopkg.in/confluentinc/confluent-kafka-go.v1/kafka"
+	"google.golang.org/protobuf/proto"
 
 	grpc_middleware "github.com/grpc-ecosystem/go-grpc-middleware"
 	grpc_zap "github.com/grpc-ecosystem/go-grpc-middleware/logging/zap"
@@ -286,7 +285,7 @@ func (srv *OnmsGrpcIpcServer) initGrpcServer() error {
 	if srv.TLSEnabled {
 		creds, err := credentials.NewServerTLSFromFile(srv.TLSCertFile, srv.TLSKeyFile)
 		if err != nil {
-			return fmt.Errorf("Failed to setup TLS: %v", err)
+			return fmt.Errorf("failed to setup TLS: %v", err)
 		}
 		options = append(options, grpc.Creds(creds))
 	}
@@ -343,12 +342,10 @@ func (srv *OnmsGrpcIpcServer) initDelayQueueProcessor() {
 
 // Updates the Kafka configuration map with a list of property flags
 func (srv *OnmsGrpcIpcServer) updateKafkaConfig(cfg *kafka.ConfigMap, properties PropertiesFlag) error {
-	if properties != nil {
-		for _, kv := range properties {
-			array := strings.Split(kv, "=")
-			if err := cfg.SetKey(array[0], array[1]); err != nil {
-				return err
-			}
+	for _, kv := range properties {
+		array := strings.Split(kv, "=")
+		if err := cfg.SetKey(array[0], array[1]); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -680,7 +677,7 @@ func (srv *OnmsGrpcIpcServer) getTotalChunks(data []byte) int32 {
 	if srv.MaxBufferSize == 0 {
 		return int32(1)
 	}
-	chunks := int32(math.Ceil(float64(len(data) / srv.MaxBufferSize)))
+	chunks := int32(len(data) / srv.MaxBufferSize)
 	if len(data)%srv.MaxBufferSize > 0 {
 		chunks++
 	}

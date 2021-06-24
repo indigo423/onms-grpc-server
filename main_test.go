@@ -8,14 +8,18 @@ import (
 	"github.com/agalue/onms-grpc-server/protobuf/ipc"
 	"github.com/agalue/onms-grpc-server/protobuf/rpc"
 	"github.com/agalue/onms-grpc-server/protobuf/sink"
-	"github.com/golang/protobuf/proto"
+	"github.com/confluentinc/confluent-kafka-go/kafka"
 	"go.uber.org/zap"
 	"google.golang.org/grpc/metadata"
-	"gopkg.in/confluentinc/confluent-kafka-go.v1/kafka"
+	"google.golang.org/protobuf/proto"
 	"gotest.tools/v3/assert"
 )
 
 // Mock Interfaces
+
+type FIELD string
+
+const ID_FIELD FIELD = "id"
 
 type mockConsumer struct {
 	msgChannel chan *kafka.Message
@@ -86,7 +90,7 @@ func (mock *mockRPCStreamingServer) SetTrailer(metadata.MD) {
 }
 
 func (mock *mockRPCStreamingServer) Context() context.Context {
-	return context.WithValue(context.Background(), "id", mock.id)
+	return context.WithValue(context.Background(), ID_FIELD, mock.id)
 }
 
 func (mock *mockRPCStreamingServer) SendMsg(m interface{}) error {
@@ -121,13 +125,13 @@ func TestRoundRobinHandlerMap(t *testing.T) {
 	// Verify round-robin logic
 	h := handlerMap.Get()
 	assert.Equal(t, 1, handlerMap.current)
-	assert.Equal(t, "H2", h.Context().Value("id"))
+	assert.Equal(t, "H2", h.Context().Value(ID_FIELD))
 	h = handlerMap.Get()
 	assert.Equal(t, 2, handlerMap.current)
-	assert.Equal(t, "H3", h.Context().Value("id"))
+	assert.Equal(t, "H3", h.Context().Value(ID_FIELD))
 	h = handlerMap.Get()
 	assert.Equal(t, 0, handlerMap.current)
-	assert.Equal(t, "H1", h.Context().Value("id"))
+	assert.Equal(t, "H1", h.Context().Value(ID_FIELD))
 	// Verify contains logic
 	assert.Assert(t, handlerMap.Contains("001"))
 	assert.Assert(t, !handlerMap.Contains("004"))
@@ -135,7 +139,7 @@ func TestRoundRobinHandlerMap(t *testing.T) {
 	handlerMap.Set("003", &mockRPCStreamingServer{"H33"})
 	assert.Equal(t, 3, len(handlerMap.handlerIDs))
 	h = handlerMap.Find("003")
-	assert.Equal(t, "H33", h.Context().Value("id"))
+	assert.Equal(t, "H33", h.Context().Value(ID_FIELD))
 }
 
 func TestUpdateKafkaConfig(t *testing.T) {
@@ -230,15 +234,15 @@ func TestAddRPCHandler(t *testing.T) {
 	obj, ok := srv.rpcHandlerByMinionID.Load("minion01")
 	assert.Assert(t, ok)
 	h := obj.(ipc.OpenNMSIpc_RpcStreamingServer)
-	assert.Equal(t, "H1", h.Context().Value("id"))
+	assert.Equal(t, "H1", h.Context().Value(ID_FIELD))
 	obj, ok = srv.rpcHandlerByMinionID.Load("minion02")
 	assert.Assert(t, ok)
 	h = obj.(ipc.OpenNMSIpc_RpcStreamingServer)
-	assert.Equal(t, "H2", h.Context().Value("id"))
+	assert.Equal(t, "H2", h.Context().Value(ID_FIELD))
 	obj, ok = srv.rpcHandlerByMinionID.Load("minion03")
 	assert.Assert(t, ok)
 	h = obj.(ipc.OpenNMSIpc_RpcStreamingServer)
-	assert.Equal(t, "H3", h.Context().Value("id"))
+	assert.Equal(t, "H3", h.Context().Value(ID_FIELD))
 	// Verify Map by Location (single minion)
 	obj, ok = srv.rpcHandlerByLocation.Load("Durham")
 	assert.Assert(t, ok)
@@ -247,7 +251,7 @@ func TestAddRPCHandler(t *testing.T) {
 	obj, ok = durham.handlerMap.Load(durham.handlerIDs[0])
 	assert.Assert(t, ok)
 	h = obj.(ipc.OpenNMSIpc_RpcStreamingServer)
-	assert.Equal(t, "H1", h.Context().Value("id"))
+	assert.Equal(t, "H1", h.Context().Value(ID_FIELD))
 	// Verify Map by Location (multiple minions)
 	obj, ok = srv.rpcHandlerByLocation.Load("Raleigh")
 	assert.Assert(t, ok)
@@ -256,17 +260,17 @@ func TestAddRPCHandler(t *testing.T) {
 	obj, ok = raleigh.handlerMap.Load(raleigh.handlerIDs[0])
 	assert.Assert(t, ok)
 	h = obj.(ipc.OpenNMSIpc_RpcStreamingServer)
-	assert.Equal(t, "H2", h.Context().Value("id"))
+	assert.Equal(t, "H2", h.Context().Value(ID_FIELD))
 	obj, ok = raleigh.handlerMap.Load(raleigh.handlerIDs[1])
 	assert.Assert(t, ok)
 	h = obj.(ipc.OpenNMSIpc_RpcStreamingServer)
-	assert.Equal(t, "H3", h.Context().Value("id"))
+	assert.Equal(t, "H3", h.Context().Value(ID_FIELD))
 	// Verify replace handler
 	srv.addRPCHandler("Raleigh", "minion03", &mockRPCStreamingServer{"H33"})
 	obj, ok = raleigh.handlerMap.Load("minion03")
 	assert.Assert(t, ok)
 	h = obj.(ipc.OpenNMSIpc_RpcStreamingServer)
-	assert.Equal(t, "H33", h.Context().Value("id"))
+	assert.Equal(t, "H33", h.Context().Value(ID_FIELD))
 }
 
 func TestGetRPCHandler(t *testing.T) {
@@ -277,17 +281,17 @@ func TestGetRPCHandler(t *testing.T) {
 	// Get by System ID
 	handler := srv.getRPCHandler("Durham", "minion01")
 	assert.Assert(t, handler != nil)
-	assert.Equal(t, "H1", handler.Context().Value("id"))
+	assert.Equal(t, "H1", handler.Context().Value(ID_FIELD))
 	// Get by Location (round-robin)
 	handler = srv.getRPCHandler("Raleigh", "")
 	assert.Assert(t, handler != nil)
-	assert.Equal(t, "H3", handler.Context().Value("id"))
+	assert.Equal(t, "H3", handler.Context().Value(ID_FIELD))
 	handler = srv.getRPCHandler("Raleigh", "")
 	assert.Assert(t, handler != nil)
-	assert.Equal(t, "H2", handler.Context().Value("id"))
+	assert.Equal(t, "H2", handler.Context().Value(ID_FIELD))
 	handler = srv.getRPCHandler("Raleigh", "")
 	assert.Assert(t, handler != nil)
-	assert.Equal(t, "H3", handler.Context().Value("id"))
+	assert.Equal(t, "H3", handler.Context().Value(ID_FIELD))
 }
 
 func TestTransformAndSendRPCMessageSingle(t *testing.T) {
