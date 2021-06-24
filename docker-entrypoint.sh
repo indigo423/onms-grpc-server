@@ -54,4 +54,4 @@ if [ ! -z "${MAX_BUFFER_SIZE}" ]; then
   OPTIONS+=(-max-buffer-size "${MAX_BUFFER_SIZE}")
 fi
 
-exec /onms-grpc-server ${OPTIONS[@]} ${PRODUCER[@]} ${CONSUMER[@]}
+exec /bin/onms-grpc-server ${OPTIONS[@]} ${PRODUCER[@]} ${CONSUMER[@]}
