@@ -13,7 +13,7 @@ COPY --from=builder /app/onms-grpc-server /bin
 COPY --from=builder /app/grpc_health_probe /bin
 COPY ./docker-entrypoint.sh /
 RUN apk update && \
-    apk add --no-cache bash && \
+    apk add --no-cache bash tzdata && \
     rm -rf /var/cache/apk/* && \
     addgroup -S onms && \
     adduser -S -G onms onms && \
