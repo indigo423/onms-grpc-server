@@ -1,4 +1,4 @@
-version: '3.7'
+---
 
 services:
 
@@ -35,26 +35,35 @@ services:
       retries: 3
 
   kafka1:
-    image: wurstmeister/kafka:2.12-2.5.0
+    image: bitnami/kafka:2.8.1
     container_name: kafka1
     hostname: kafka1
     depends_on:
-    - zookeeper1
+      zookeeper1:
+        condition: service_healthy
+    ports:
+    - 9094:9094
     environment:
     - TZ=America/New_York
-    - KAFKA_BROKER_ID=1
-    - KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://:9092
-    - KAFKA_LISTENERS=PLAINTEXT://:9092
-    - KAFKA_ZOOKEEPER_CONNECT=zookeeper1:2181/kafka
-    - KAFKA_NUM_PARTITIONS=4
-    - KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=1
-    - KAFKA_DEFAULT_REPLICATION_FACTOR=1
-    - KAFKA_MIN_INSYNC_REPLICAS=1
-    - KAFKA_AUTO_CREATE_TOPICS_ENABLE=true
-    - KAFKA_DELETE_TOPIC_ENABLE=true
-    - KAFKA_CONTROLLED_SHUTDOWN_ENABLE=true
+    - ALLOW_PLAINTEXT_LISTENER=yes
+    - KAFKA_CFG_BROKER_ID=1
+    - KAFKA_CFG_ADVERTISED_LISTENERS=CLIENT://:9092,EXTERNAL://${EXTERNAL_IP:-192.168.0.40}:9094
+    - KAFKA_CFG_LISTENERS=CLIENT://:9092,EXTERNAL://:9094
+    - KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP=CLIENT:PLAINTEXT,EXTERNAL:PLAINTEXT
+    - KAFKA_CFG_INTER_BROKER_LISTENER_NAME=CLIENT
+    - KAFKA_CFG_ZOOKEEPER_CONNECT=zookeeper1:2181/kafka
+    - KAFKA_CFG_ZOOKEEPER_CONNECTION_TIMEOUT_MS=60000
+    - KAFKA_CFG_NUM_PARTITIONS=4
+    - KAFKA_CFG_OFFSETS_TOPIC_REPLICATION_FACTOR=1
+    - KAFKA_CFG_DEFAULT_REPLICATION_FACTOR=1
+    - KAFKA_CFG_MIN_INSYNC_REPLICAS=1
+    - KAFKA_CFG_AUTO_CREATE_TOPICS_ENABLE=true
+    - KAFKA_CFG_DELETE_TOPIC_ENABLE=true
+    - KAFKA_CFG_CONTROLLED_SHUTDOWN_ENABLE=true
+    - KAFKA_HEAP_OPTS=-Xmx${KAFKA_HEAP:-2g} -Xms${KAFKA_HEAP:-2g} -Dcom.sun.management.jmxremote.rmi.port=9999 -Djava.rmi.server.hostname=kafka
+    - JMX_PORT=9999
     healthcheck:
-      test: nc -z localhost 9092
+      test: JMX_PORT= kafka-topics.sh --list --bootstrap-server kafka1:9092
       interval: 30s
       timeout: 5s
       retries: 3
@@ -64,7 +73,8 @@ services:
     container_name: manager
     hostname: manager
     depends_on:
-    - zookeeper1
+      zookeeper1:
+        condition: service_healthy
     ports:
     - 9000:9000 
     environment:
@@ -76,13 +86,34 @@ services:
       timeout: 5s
       retries: 3
 
+  grpc1:
+    container_name: grpc1
+    hostname: grpc1
+    build: ..
+    depends_on:
+      kafka1:
+        condition: service_healthy
+    ports:
+    - 2112:2112
+    - 8990:8990
+    environment:
+    - TZ=America/New_York
+    - BOOTSTRAP_SERVER=kafka1:9092
+    healthcheck:
+      test: /bin/grpc_health_probe -addr ':8990' -rpc-timeout 2s
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
   opennms:
+    image: opennms/horizon:28.1.1
     container_name: opennms
     hostname: opennms
-    image: opennms/horizon:26.1.2
     depends_on:
-    - database
-    - kafka1
+      database:
+        condition: service_healthy
+      kafka1:
+        condition: service_healthy
     command: [ -s ]
     ports:
     - 8980:8980
@@ -95,34 +126,22 @@ services:
     - POSTGRES_PORT=5432
     - POSTGRES_USER=postgres
     - POSTGRES_PASSWORD=postgres
-    - JAVA_OPTS=-Xms4096m -Xmx4096m -XX:+UseG1GC -XX:+UseStringDeduplication
+    - JAVA_OPTS=-Xms${OPENNMS_HEAP:-4g} -Xmx${OPENNMS_HEAP:-4g} -XX:+AlwaysPreTouch -XX:+UseStringDeduplication
     healthcheck:
       test: curl -f -I http://localhost:8980/opennms/login.jsp
       interval: 1m
       timeout: 5s
       retries: 3
- 
-  grpc1:
-    container_name: grpc1
-    hostname: grpc1
-    build: ..
-    depends_on:
-    - kafka1
-    ports:
-    - 2112:2112
-    - 8990:8990
-    environment:
-    - TZ=America/New_York
-    - BOOTSTRAP_SERVER=kafka1:9092
 
   minion1:
     container_name: minion1
     hostname: minion1
-    image: opennms/minion:26.1.2
+    image: opennms/minion:28.1.1
     depends_on:
-    - kafka1
-    - grpc1
-    - opennms
+      grpc1:
+        condition: service_healthy
+      opennms:
+        condition: service_healthy
     command: [ -c ]
     volumes:
     - ./minion1.yaml:/opt/minion/minion-config.yaml
@@ -140,11 +159,12 @@ services:
   minion2:
     container_name: minion2
     hostname: minion2
-    image: opennms/minion:26.1.2
+    image: opennms/minion:28.1.1
     depends_on:
-    - kafka1
-    - grpc1
-    - opennms
+      grpc1:
+        condition: service_healthy
+      opennms:
+        condition: service_healthy
     command: [ -c ]
     volumes:
     - ./minion2.yaml:/opt/minion/minion-config.yaml
@@ -162,11 +182,12 @@ services:
   minion3:
     container_name: minion3
     hostname: minion3
-    image: opennms/minion:26.1.2
+    image: opennms/minion:28.1.1
     depends_on:
-    - kafka1
-    - grpc1
-    - opennms
+      grpc1:
+        condition: service_healthy
+      opennms:
+        condition: service_healthy
     command: [ -c ]
     volumes:
     - ./minion3.yaml:/opt/minion/minion-config.yaml
@@ -180,4 +201,3 @@ services:
       interval: 1m
       timeout: 5s
       retries: 3
-
