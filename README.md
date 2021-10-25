@@ -49,8 +49,9 @@ Use `--help` for more details.
 docker run -d --name grpc-server \
   -e INSTANCE_ID=Apex \
   -e TLS_ENABLED=true \
-  -e TLS_KEY=/grpc/key.pem \
-  -e TLS_CERT=/grpc/cert.pem \
+  -e TLS_SERVER_KEY=/grpc/key.pem \
+  -e TLS_SERVER_CERT=/grpc/cert.pem \
+  -e TLS_CLIENT_CA_CERT=/grpc/ca.pem \
   -e PORT=8990 \
   -e HTTP_PORT=2112 \
   -e MAX_BUFFER_SIZE=10485760 \

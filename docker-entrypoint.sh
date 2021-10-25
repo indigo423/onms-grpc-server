@@ -41,11 +41,14 @@ fi
 if [ "${TLS_ENABLED}" == "true" ]; then
   OPTIONS+=(-tls-enabled)
 fi
-if [ ! -z "${TLS_CERT}" ]; then
-  OPTIONS+=(-tls-cert ${TLS_CERT})
+if [ ! -z "${TLS_SERVER_CERT}" ]; then
+  OPTIONS+=(-tls-server-cert ${TLS_SERVER_CERT})
 fi
-if [ ! -z "${TLS_KEY}" ]; then
-  OPTIONS+=(-tls-key ${TLS_KEY})
+if [ ! -z "${TLS_SERVER_KEY}" ]; then
+  OPTIONS+=(-tls-server-key ${TLS_SERVER_KEY})
+fi
+if [ ! -z "${TLS_CLIENT_CA_CERT}" ]; then
+  OPTIONS+=(-tls-client-ca-cert ${TLS_CLIENT_CA_CERT})
 fi
 if [ ! -z "${INSTANCE_ID}" ]; then
   OPTIONS+=(-instance-id "${INSTANCE_ID}")

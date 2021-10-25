@@ -7,10 +7,13 @@
 package main
 
 import (
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"net"
 	"net/http"
 	"os"
@@ -153,8 +156,9 @@ type OnmsGrpcIpcServer struct {
 	OnmsInstanceID          string
 	MaxBufferSize           int
 	TLSEnabled              bool
-	TLSCertFile             string
-	TLSKeyFile              string
+	TLSServerCertFile       string
+	TLSServerKeyFile        string
+	TLSClientCACertFile     string
 	Logger                  *zap.Logger
 
 	server    *grpc.Server
@@ -283,7 +287,26 @@ func (srv *OnmsGrpcIpcServer) initGrpcServer() error {
 	// Initialize gRPC Server
 	options := make([]grpc.ServerOption, 0)
 	if srv.TLSEnabled {
-		creds, err := credentials.NewServerTLSFromFile(srv.TLSCertFile, srv.TLSKeyFile)
+		cert, err := tls.LoadX509KeyPair(srv.TLSServerCertFile, srv.TLSServerKeyFile)
+		if err != nil {
+			return err
+		}
+		cfg := &tls.Config{
+			Certificates: []tls.Certificate{cert},
+		}
+		if srv.TLSClientCACertFile != "" {
+			certPool := x509.NewCertPool()
+			bs, err := ioutil.ReadFile(srv.TLSClientCACertFile)
+			if err != nil {
+				return err
+			}
+			if ok := certPool.AppendCertsFromPEM(bs); !ok {
+				return fmt.Errorf("failed to append client certs")
+			}
+			cfg.ClientAuth = tls.RequireAndVerifyClientCert
+			cfg.ClientCAs = certPool
+		}
+		creds := credentials.NewTLS(cfg)
 		if err != nil {
 			return fmt.Errorf("failed to setup TLS: %v", err)
 		}
@@ -718,9 +741,10 @@ func main() {
 	flag.Var(&srv.KafkaProducerProperties, "producer-cfg", "Kafka Producer configuration entry (can be used multiple times)\nfor instance: acks=1")
 	flag.Var(&srv.KafkaConsumerProperties, "consumer-cfg", "Kafka Consumer configuration entry (can be used multiple times)\nfor instance: acks=1")
 	flag.IntVar(&srv.MaxBufferSize, "max-buffer-size", defaultMaxByfferSize, "Maximum Buffer Size for RPC/Sink API Messages")
-	flag.StringVar(&srv.TLSCertFile, "tls-cert", "", "Path to the TLS Certificate file")
-	flag.StringVar(&srv.TLSKeyFile, "tls-key", "", "Path to the TLS Key file")
 	flag.BoolVar(&srv.TLSEnabled, "tls-enabled", false, "Enable TLS for the gRPC Server")
+	flag.StringVar(&srv.TLSServerCertFile, "tls-server-cert", "", "Path to the Server Certificate file")
+	flag.StringVar(&srv.TLSServerKeyFile, "tls-server-key", "", "Path to the Server Key file")
+	flag.StringVar(&srv.TLSClientCACertFile, "tls-client-ca-cert", "", "Path to the Client CA Certificate file (enables mTLS)")
 	flag.StringVar(&logLevel, "log-level", "info", "Log Level")
 	flag.Parse()
 
