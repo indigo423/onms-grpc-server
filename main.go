@@ -271,7 +271,7 @@ func (srv *OnmsGrpcIpcServer) initKafkaProducer() error {
 					bytes := len(ev.Value)
 					srv.metricDeliveredMessages.WithLabelValues(*ev.TopicPartition.Topic).Inc()
 					srv.metricDeliveredBytes.WithLabelValues(*ev.TopicPartition.Topic).Add(float64(bytes))
-					srv.log.Infof("kafka delivered message of %d bytes with key %s to %v", bytes, ev.Key, ev.TopicPartition)
+					srv.log.Debugf("kafka delivered message of %d bytes with key %s to %v", bytes, ev.Key, ev.TopicPartition)
 				}
 			default:
 				srv.log.Debugf("kafka event: %s", ev)
