@@ -87,9 +87,10 @@ services:
       retries: 3
 
   grpc1:
+    build: ..
+    image: agalue/onms-grpc-server
     container_name: grpc1
     hostname: grpc1
-    build: ..
     depends_on:
       kafka1:
         condition: service_healthy
