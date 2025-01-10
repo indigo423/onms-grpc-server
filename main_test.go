@@ -5,10 +5,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/agalue/onms-grpc-server/protobuf/ipc"
-	"github.com/agalue/onms-grpc-server/protobuf/rpc"
-	"github.com/agalue/onms-grpc-server/protobuf/sink"
 	"github.com/confluentinc/confluent-kafka-go/kafka"
+	"github.com/indigo423/onms-grpc-server/protobuf/ipc"
+	"github.com/indigo423/onms-grpc-server/protobuf/rpc"
+	"github.com/indigo423/onms-grpc-server/protobuf/sink"
 	"go.uber.org/zap"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/protobuf/proto"

@@ -1,4 +1,4 @@
-module github.com/agalue/onms-grpc-server
+module github.com/indigo423/onms-grpc-server
 
 go 1.20
 

@@ -1,6 +1,6 @@
 FROM golang:alpine AS builder
 WORKDIR /app
-ENV GRPC_HEALTH_PROBE_VERSION=v0.3.2
+ENV GRPC_HEALTH_PROBE_VERSION=v0.4.36
 ADD ./ /app/
 RUN echo "@edgecommunity http://dl-cdn.alpinelinux.org/alpine/edge/community" >> /etc/apk/repositories && \
     apk update && \

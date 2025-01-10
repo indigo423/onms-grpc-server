@@ -22,10 +22,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/agalue/onms-grpc-server/protobuf/ipc"
-	"github.com/agalue/onms-grpc-server/protobuf/rpc"
-	"github.com/agalue/onms-grpc-server/protobuf/sink"
 	"github.com/confluentinc/confluent-kafka-go/kafka"
+	"github.com/indigo423/onms-grpc-server/protobuf/ipc"
+	"github.com/indigo423/onms-grpc-server/protobuf/rpc"
+	"github.com/indigo423/onms-grpc-server/protobuf/sink"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.uber.org/zap"

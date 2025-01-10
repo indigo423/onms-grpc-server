@@ -1,13 +1,13 @@
 name: Build and Test
 
 on:
+  workflow_dispatch:
   push:
-    branches: [ master ]
+    branches: [ main ]
   pull_request:
-    branches: [ master ]
+    branches: [ main ]
 
 jobs:
-
   build:
     runs-on: ubuntu-latest
     steps:
@@ -16,22 +16,22 @@ jobs:
     - name: Set up Go
       uses: actions/setup-go@v4
       with:
-        go-version: '1.20'
+        go-version: '1.23'
 
     - name: Build
-      run: go build -v ./...
+      run: make
 
-    - name: Test
-      run: go test -v ./...
-
-    - name: Login to DockerHub
+    - name: Login to Quay.io
       uses: docker/login-action@v3
       with:
-        username: ${{ secrets.DOCKERHUB_USERNAME }}
-        password: ${{ secrets.DOCKERHUB_PASSWORD }}
-
+        registry: quay.io
+        username: ${{ secrets.QUAY_USERNAME }}
+        password: ${{ secrets.QUAY_PASSWORD }}
+    - name: Get short sha
+      id: vars
+      run: echo "sha_short=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
     - name: Build and Push
       uses: docker/build-push-action@v5
       with:
         push: true
-        tags: agalue/onms-grpc-server
+        tags: quay.io/labmonkeys/onms-grpc-server:${{ steps.vars.outputs.sha_short }}

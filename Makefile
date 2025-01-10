@@ -1,3 +1,5 @@
+.DEFAULT_GOAL := tests
+
 PROTOBUF_PATH := ./protobuf
 
 .PHONY deps:
@@ -15,4 +17,8 @@ protobuf: deps-protobuf
 	protoc --proto_path=$(PROTOBUF_PATH)/proto --go_out=$(PROTOBUF_PATH) --go-grpc_out=$(PROTOBUF_PATH) ipc.proto
 
 onms-grpc-server: deps
-	go build
+	go build -v ./...
+
+.PHONY tests:
+tests: deps onms-grpc-server
+	go test -v ./...
